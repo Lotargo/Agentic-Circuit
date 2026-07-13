@@ -12,15 +12,6 @@ services:
     networks: [agentic]
     restart: unless-stopped
 
-  mongodb:
-    image: mongo:7
-    ports:
-      - "27617:27017"
-    volumes:
-      - mongo_data:/data/db
-    networks: [agentic]
-    restart: unless-stopped
-
   tei-embedding:
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
     ports:
@@ -53,7 +44,6 @@ services:
     environment:
       CONFIG_DIR: /app/config
       QDRANT_URL: http://qdrant:6333
-      MONGODB_URL: mongodb://mongodb:27017
       EMBEDDING_SIDECAR_URL: http://tei-embedding:80
       RERANK_SIDECAR_URL: http://tei-rerank:80
       EMBEDDING_VECTOR_SIZE: ${EMBEDDING_VECTOR_SIZE:-384}
@@ -62,15 +52,10 @@ services:
       - ./config:/app/config:ro
     depends_on:
       - qdrant
-      - mongodb
       - tei-embedding
       - tei-rerank
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://localhost:8823/healthz', timeout=2)
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8823/healthz', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 12
@@ -89,17 +74,14 @@ services:
       PY_ENGINE_URL: http://py-engine:8823
       TS_GATEWAY_PORT: "9191"
       PROVIDERS_YAML: /app/config/providers.yaml
+      PROVIDERS_ADMIN_TOKEN: ${PROVIDERS_ADMIN_TOKEN:-}
     volumes:
       - ./config:/app/config
     depends_on:
       py-engine:
         condition: service_healthy
     healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - fetch('http://localhost:9191/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      test: ["CMD", "node", "-e", "fetch('http://localhost:9191/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 6
@@ -128,7 +110,6 @@ networks:
 
 volumes:
   qdrant_data:
-  mongo_data:
   tei_embedding_data:
   tei_rerank_data:
   openwebui_data:
