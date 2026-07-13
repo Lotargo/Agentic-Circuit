@@ -1,4 +1,4 @@
-"""Tests: prompt message builders for every node."""
+"""Tests for prompt message builders."""
 
 from agentic_circuit.config import CircuitConfig
 from agentic_circuit.graph.prompts import (
@@ -9,46 +9,53 @@ from agentic_circuit.graph.prompts import (
 )
 
 cfg = CircuitConfig.from_disk()
+CONVERSATION = [
+    {"role": "user", "content": "Меня зовут Олег"},
+    {"role": "assistant", "content": "Запомнила"},
+    {"role": "user", "content": "Как меня зовут?"},
+]
 
 
 def test_router_messages_use_config_and_ask_for_decision():
     agent = cfg.agents["router"]
-    msgs = router_messages(agent, "Привет, как дела?")
-    assert msgs[0]["role"] == "system"
-    assert msgs[1]["role"] == "user"
-    assert agent.base_prompt.strip() in msgs[0]["content"]
-    assert "fast" in msgs[0]["content"] and "slow" in msgs[0]["content"]
+    messages = router_messages(agent, "Привет")
+    assert agent.base_prompt.strip() in messages[0]["content"]
+    assert "fast" in messages[0]["content"] and "slow" in messages[0]["content"]
 
 
-def test_phase1_messages_have_system_and_user():
+def test_phase1_preserves_history_and_uses_one_prism():
     agent = cfg.agents["creative-1"]
-    msgs = phase1_messages(agent, "Напиши стих", contexts=["прошлое"])
-    assert msgs[0]["role"] == "system"
-    assert "Напиши стих" in msgs[1]["content"]
-    assert "прошлое" in msgs[1]["content"]
+    messages = phase1_messages(agent, CONVERSATION, ["память"], prism="joy")
+    contents = "\n".join(message["content"] for message in messages)
+    assert "Меня зовут Олег" in contents
+    assert "Как меня зовут?" in contents
+    assert "память" in contents
+    assert "Активная призма настроения: joy" in messages[0]["content"]
+    assert "resentment" not in messages[0]["content"].lower()
 
 
-def test_phase2_sees_only_its_own_phase1():
+def test_phase2_sees_history_and_own_phase1():
     agent = cfg.agents["creative-2"]
-    msgs = phase2_messages(agent, "Напиши стих", "сырой ответ", contexts=[])
-    user = msgs[1]["content"]
-    assert "сырой ответ" in user
-    assert "Запрос пользователя" in user
+    messages = phase2_messages(agent, CONVERSATION, "сырой ответ", [], prism="neutral")
+    contents = "\n".join(message["content"] for message in messages)
+    assert "Меня зовут Олег" in contents
+    assert "сырой ответ" in contents
 
 
-def test_synthesis_messages_aggregate_all_circuits_and_treat_as_own():
+def test_synthesis_aggregates_all_circuits_and_history():
     agent = cfg.agents["synthesis"]
-    msgs = synthesis_messages(
+    messages = synthesis_messages(
         agent,
-        "Какой план?",
+        CONVERSATION,
         {"creative": "креатив", "pragmatic": "прагма", "effective": "эффект"},
         {"creative": "креатив2", "pragmatic": "прагма2", "effective": "эффект2"},
         contexts=["воспоминание"],
         web_results=["факт из сети"],
+        prism="neutral",
     )
-    user = msgs[1]["content"]
+    contents = "\n".join(message["content"] for message in messages)
+    assert "Меня зовут Олег" in contents
     for circuit in ("creative", "pragmatic", "effective"):
-        assert circuit in user
-    assert "ТВОИ мысли" in user or "твои мысли" in user
-    assert "факт из сети" in user
-    assert "воспоминание" in user
+        assert circuit in contents
+    assert "факт из сети" in contents
+    assert "воспоминание" in contents
