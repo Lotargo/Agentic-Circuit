@@ -1,66 +1,92 @@
 # agentic-circuit (chat-openwebui)
 
-Мульти-агентный «контур» с единой личностью **Лиза**. Отвечает двумя путями:
+Мульти-агентный контур с единой личностью **Лиза**:
 
-- **fast** — роутер сразу отдаёт запрос агенту синтеза (прямой ответ).
-- **slow** — три изолированных контура (креативный, прагматичный, эффективный)
-  работают параллельно, каждый в две фазы (сырой ответ → критика), затем агент
-  синтеза собирает всё в финальный ответ, воспринимая чужие потоки как свои мысли.
+- **fast**: router сразу передаёт запрос synthesis;
+- **slow**: creative, pragmatic и effective выполняются параллельно, каждый проходит phase-1 и phase-2, затем synthesis собирает единый ответ.
 
-## Архитектура
+## Фактическая архитектура
 
+```text
+OpenWebUI
+    │ OpenAI-compatible HTTP/SSE
+    ▼
+TS gateway (Express, transparent proxy)
+    │ OpenAI-compatible HTTP/SSE
+    ▼
+Python engine (FastAPI + LangGraph)
+    ├─ router ─ fast ───────────────┐
+    └─ slow ─ creative phase1/2 ────┤
+             pragmatic phase1/2 ────┼─> synthesis
+             effective phase1/2 ────┘
+                     │
+                     ├─ Qdrant + embedding/rerank sidecars
+                     └─ optional LangSearch HTTP API
 ```
-OpenWebUI ──(OpenAI-compatible /v1/chat/completions)──> TS-шлюз (AI SDK)
-                                                           │  стрим
-                                                           ▼
-                                               Python LangGraph engine (langserve)
-                                                router ─┬─(fast)─> synthesis
-                                                        └─(slow)─> [creative, pragmatic, effective] параллельно
-                                                                      phase-1 (raw) ─> phase-2 (critic)
-                                                                      └─> synthesis (видит всё + RAG + web)
-```
 
-- **Python-движок** (`src/py-engine`): LangGraph (оркестрация), FastAPI/langserve
-  (HTTP), RAG (Qdrant + TEI embedding + BM25 + ColBERT rerank), langsearch (web).
-- **TS-шлюз** (`src/ts-gateway`): Vercel AI SDK, OpenAI-compatible gateway для
-  OpenWebUI + REST управления провайдерами (`/v1/providers`).
-- **Конфиг** (`config/`): YAML — единый `providers.yaml` и пер-агентные `agents/*.yaml`
-  + индивидуальные призмы `manifests/<agent>/<prism>.md`.
+- **Python engine** (`src/py-engine`): LangGraph, FastAPI, OpenAI-compatible provider client, Qdrant, BM25 и HTTP-клиенты embedding/rerank/web-search.
+- **TS gateway** (`src/ts-gateway`): прозрачный Express proxy для `/v1/models` и `/v1/chat/completions`, а также CRUD `/v1/providers`.
+- **Config** (`config/`): `providers.yaml`, `agents/*.yaml`, `manifests/<agent>/<prism>.md`.
+- **OpenWebUI** подключается к TS gateway как к OpenAI-compatible backend.
 
-## Запуск (локально, docker-compose)
+Исходная спецификация упоминает LangServe, LlamaIndex и использование Vercel AI SDK в runtime. Текущая реализация их не использует. Подробности и оставшиеся расхождения находятся в `docs/superpowers/specs/2026-07-14-implementation-audit.md`.
+
+## Локальный запуск
+
+Скопируйте env-файл и заполните как минимум ключ провайдера:
 
 ```bash
-cp .env.example .env        # заполните ключи (OPENCODE_ZEN_API_KEY, LANGSEARCH_API_KEY)
-docker compose up --build   # поднимает qdrant, mongodb, tei, colbert, py-engine, ts-gateway, openwebui
+cp .env.example .env
 ```
 
-- OpenWebUI: http://localhost:3200 (уже настроен на TS-шлюз)
-- TS-шлюз: http://localhost:9191
-- Python engine: http://localhost:8823
+CPU-first запуск:
 
-Инференс TEI/ColBERT работает на GPU при наличии CUDA и откатывается на CPU иначе.
+```bash
+docker compose up --build
+```
+
+Запуск с NVIDIA GPU override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+```
+
+Адреса:
+
+- OpenWebUI: `http://localhost:3200`
+- TS gateway: `http://localhost:9191`
+- Python engine: `http://localhost:8823`
+
+Основной Compose больше не требует NVIDIA runtime. GPU reservations находятся только в `docker-compose.gpu.yml`.
 
 ## Разработка без Docker
 
-Python-движок:
+Python:
 
 ```bash
 cd src/py-engine
-uv venv && uv pip install -e ".[test]"
-pytest                       # юнит + интегр-тесты графа на моках провайдера
+uv venv
+uv pip install -e ".[test]"
+uv run pytest
 ```
 
-TS-шлюз:
+TypeScript:
 
 ```bash
 cd src/ts-gateway
-npm install
+npm ci
+npm run typecheck
+npm run build
 npm run dev
 ```
 
-## Тестирование
+## Автоматические проверки
 
-- `tests/test_config.py` — парсинг `providers.yaml` / `agents/*.yaml`, загрузка манифестов.
-- `tests/test_prompts.py` — компоновка промптов (base + manifests; meta_instruction для синтеза).
-- `tests/test_graph.py` — интегр-тест графа LangGraph на моках: fast/slow, изоляция
-  контуров (phase-2 видит только свой phase-1), агрегация в синтезе.
+GitHub Actions выполняет:
+
+- установку Python-пакета и pytest;
+- TypeScript typecheck и production build;
+- `docker compose config`;
+- чистую сборку Docker-образов `py-engine` и `ts-gateway`.
+
+CI не заменяет полный smoke-test с загруженными моделями, реальным provider API и интерфейсом OpenWebUI. Актуальный статус находится в `docs/superpowers/specs/2026-07-13-agentic-circuit-todo.md`.
