@@ -12,6 +12,14 @@ async def _fake_run(conversation: list[dict], prism: str) -> str:
     return "готовый ответ"
 
 
+async def _fake_stream(conversation: list[dict], prism: str):
+    assert conversation[0]["content"] == "Меня зовут Олег"
+    assert conversation[-1]["content"] == "Как меня зовут?"
+    assert prism == "joy"
+    yield "готовый "
+    yield "ответ"
+
+
 def test_models_endpoint_exposes_logical_model():
     client = TestClient(main.app)
     response = client.get("/v1/models")
@@ -40,8 +48,8 @@ def test_non_stream_completion_preserves_history_and_prism(monkeypatch):
     assert body["choices"][0]["message"]["content"] == "готовый ответ"
 
 
-def test_stream_uses_single_sse_prefix_and_done_marker(monkeypatch):
-    monkeypatch.setattr(main, "_run", _fake_run)
+def test_stream_forwards_each_token_as_its_own_sse_chunk(monkeypatch):
+    monkeypatch.setattr(main, "_stream", _fake_stream)
     client = TestClient(main.app)
     response = client.post(
         "/v1/chat/completions",
@@ -59,7 +67,9 @@ def test_stream_uses_single_sse_prefix_and_done_marker(monkeypatch):
     assert response.headers["content-type"].startswith("text/event-stream")
     assert "data: data:" not in response.text
     assert "data: [DONE]" in response.text
-    assert "chat.completion.chunk" in response.text
+    assert response.text.count("chat.completion.chunk") == 3
+    assert "готовый " in response.text
+    assert "ответ" in response.text
 
 
 def test_invalid_final_message_is_rejected():
