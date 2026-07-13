@@ -5,9 +5,19 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ThinkingLevel = Literal["off", "low", "medium", "high"]
+PrismName = Literal[
+    "joy",
+    "flirt",
+    "resentment",
+    "arousal",
+    "anger",
+    "apathy",
+    "neutral",
+    "sadness",
+]
 
 
 class AgentRole(str, Enum):
@@ -47,10 +57,18 @@ class AgentConfig(BaseModel):
     role: AgentRole = AgentRole.circuit_phase1
     base_prompt: str
     manifests: list[str] = Field(default_factory=list)
+    default_prism: PrismName = "neutral"
     meta_instruction: Optional[str] = None
     model: ModelConfig
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     collection: Optional[str] = None
+
+    @field_validator("manifests")
+    @classmethod
+    def unique_manifests(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("manifest names must be unique")
+        return values
 
     @property
     def is_synthesis(self) -> bool:
