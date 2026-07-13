@@ -1,0 +1,5 @@
+
+> agentic-circuit-ts-gateway@0.2.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+src/client/pyEngine.ts(1,40): error TS2307: Cannot find module '@ai-sdk/openai-compatible' or its corresponding type declarations.
