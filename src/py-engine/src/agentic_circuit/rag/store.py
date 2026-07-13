@@ -1,7 +1,7 @@
-"""Qdrant-backed vector memory with hybrid (dense + BM25 + ColBERT rerank) retrieval.
+"""Qdrant-backed vector memory with hybrid retrieval.
 
-Per-circuit isolation: each circuit gets its own collection name. The synthesis
-agent is given one retriever over all circuit collections.
+Each circuit has an isolated collection. Dense results are hydrated from Qdrant
+payloads so memory still works after the Python process restarts.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from .rerank import RerankClient
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6633")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
-VECTOR_SIZE = 384  # intfloat/multilingual-e5-small
+VECTOR_SIZE = 384
 
 
 class VectorMemory:
@@ -38,108 +38,155 @@ class VectorMemory:
         self._qclient = None
         self._qdrant_url = qdrant_url or QDRANT_URL
 
-    # -- connection -----------------------------------------------------
     def _ensure_qdrant(self):
         if self._qclient is not None:
             return self._qclient
         try:
             from qdrant_client import AsyncQdrantClient
 
-            self._qclient = AsyncQdrantClient(url=self._qdrant_url, api_key=QDRANT_API_KEY or None)
+            self._qclient = AsyncQdrantClient(
+                url=self._qdrant_url,
+                api_key=QDRANT_API_KEY or None,
+            )
         except Exception:
             self._qclient = None
         return self._qclient
 
     async def ensure_collection(self) -> None:
-        q = self._ensure_qdrant()
-        if q is None:
+        client = self._ensure_qdrant()
+        if client is None:
             return
         try:
             from qdrant_client.models import Distance, VectorParams
 
-            if not await q.collection_exists(self.collection):
-                await q.create_collection(
+            if not await client.collection_exists(self.collection):
+                await client.create_collection(
                     self.collection,
-                    vectors_config=VectorParams(size=self._vector_size, distance=Distance.COSINE),
+                    vectors_config=VectorParams(
+                        size=self._vector_size,
+                        distance=Distance.COSINE,
+                    ),
                 )
         except Exception:
             self._qclient = None
 
-    # -- write ----------------------------------------------------------
     async def upsert(self, text: str, doc_id: Optional[str] = None) -> str:
         doc_id = doc_id or str(uuid.uuid4())
+        vector = (await self._embed.embed([text]))[0]
+
         self._texts[doc_id] = text
+        self._vecs[doc_id] = vector
         self._bm25.add(doc_id, text)
-        vec = (await self._embed.embed([text]))[0]
-        self._vecs[doc_id] = vec
-        q = self._ensure_qdrant()
-        if q is not None:
+
+        client = self._ensure_qdrant()
+        if client is not None:
             try:
                 from qdrant_client.models import PointStruct
 
-                await q.upsert(self.collection, points=[PointStruct(id=doc_id, vector=vec, payload={"text": text})])
+                await client.upsert(
+                    self.collection,
+                    points=[
+                        PointStruct(
+                            id=doc_id,
+                            vector=vector,
+                            payload={"text": text},
+                        )
+                    ],
+                )
             except Exception:
                 self._qclient = None
         return doc_id
 
-    # -- read -----------------------------------------------------------
     async def _dense_search(self, query: str, top_k: int) -> list[tuple[str, float]]:
-        q = self._ensure_qdrant()
-        qvec = (await self._embed.embed([query]))[0]
-        if q is not None:
+        client = self._ensure_qdrant()
+        query_vector = (await self._embed.embed([query]))[0]
+        if client is not None:
             try:
-                hits = await q.search(self.collection, query_vector=qvec, limit=top_k)
-                return [(h.id, float(h.score)) for h in hits]
+                hits = await client.search(
+                    self.collection,
+                    query_vector=query_vector,
+                    limit=top_k,
+                    with_payload=True,
+                )
+                results: list[tuple[str, float]] = []
+                for hit in hits:
+                    doc_id = str(hit.id)
+                    payload = hit.payload or {}
+                    text = payload.get("text") if isinstance(payload, dict) else None
+                    if isinstance(text, str):
+                        self._texts[doc_id] = text
+                    results.append((doc_id, float(hit.score)))
+                return results
             except Exception:
                 self._qclient = None
-        # in-memory fallback (cosine)
-        out = []
-        for did, vec in self._vecs.items():
-            out.append((did, _cosine(qvec, vec)))
-        out.sort(key=lambda x: x[1], reverse=True)
-        return out[:top_k]
 
-    async def retrieve(self, query: str, top_k: int = 5, use_rerank: bool = True) -> list[str]:
+        results = [
+            (doc_id, _cosine(query_vector, vector))
+            for doc_id, vector in self._vecs.items()
+        ]
+        results.sort(key=lambda item: item[1], reverse=True)
+        return results[:top_k]
+
+    async def retrieve(
+        self,
+        query: str,
+        top_k: int = 5,
+        use_rerank: bool = True,
+    ) -> list[str]:
         dense = await self._dense_search(query, top_k * 2)
         lexical = self._bm25.search(query, top_k * 2)
-        # reciprocal rank fusion
+
         fused: dict[str, float] = {}
-        for rank, (did, _) in enumerate(dense):
-            fused[did] = fused.get(did, 0.0) + 1.0 / (rank + 1)
-        for rank, (did, _) in enumerate(lexical):
-            fused[did] = fused.get(did, 0.0) + 1.0 / (rank + 1)
-        ordered = sorted(fused.keys(), key=lambda d: fused[d], reverse=True)
-        docs = [self._texts[d] for d in ordered[: top_k * 2]]
-        if use_rerank and self._rerank and docs:
+        for rank, (doc_id, _) in enumerate(dense):
+            fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (rank + 1)
+        for rank, (doc_id, _) in enumerate(lexical):
+            fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (rank + 1)
+
+        ordered_ids = sorted(fused, key=fused.__getitem__, reverse=True)
+        documents = [
+            self._texts[doc_id]
+            for doc_id in ordered_ids[: top_k * 2]
+            if doc_id in self._texts
+        ]
+
+        if use_rerank and self._rerank and documents:
             try:
-                ranked = await self._rerank.rerank(query, docs, top_n=top_k)
-                # rerank returns (doc_text, score) when aligned
+                ranked = await self._rerank.rerank(query, documents, top_n=top_k)
                 if ranked and ranked[0][0]:
-                    return [d for d, _ in ranked]
-                # else scores aligned to docs by index
-                order = sorted(range(len(docs)), key=lambda i: ranked[i][1], reverse=True)
-                return [docs[i] for i in order[:top_k]]
+                    return [document for document, _ in ranked]
+                if ranked:
+                    order = sorted(
+                        range(min(len(documents), len(ranked))),
+                        key=lambda index: ranked[index][1],
+                        reverse=True,
+                    )
+                    return [documents[index] for index in order[:top_k]]
             except Exception:
                 pass
-        return docs[:top_k]
+        return documents[:top_k]
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b:
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = sum(x * x for x in a) ** 0.5
-    nb = sum(y * y for y in b) ** 0.5
-    return dot / (na * nb) if na and nb else 0.0
+    dot = sum(left * right for left, right in zip(a, b))
+    norm_a = sum(value * value for value in a) ** 0.5
+    norm_b = sum(value * value for value in b) ** 0.5
+    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
 
 
 class NullMemory:
-    """Memory that does nothing (used for circuits/tools with rag disabled)."""
+    """Memory that does nothing (used when RAG is disabled)."""
 
     async def ensure_collection(self) -> None: ...
 
     async def upsert(self, text: str, doc_id: Optional[str] = None) -> str:
         return doc_id or ""
 
-    async def retrieve(self, query: str, top_k: int = 5, use_rerank: bool = True) -> list[str]:
+    async def retrieve(
+        self,
+        query: str,
+        top_k: int = 5,
+        use_rerank: bool = True,
+    ) -> list[str]:
         return []
