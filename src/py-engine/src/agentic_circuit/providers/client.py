@@ -1,9 +1,10 @@
-"""OpenAI-compatible provider client with agent parameter mapping."""
+"""OpenAI-compatible provider client with completion and streaming APIs."""
 
 from __future__ import annotations
 
 import os
 import time
+from collections.abc import AsyncIterator
 from typing import Optional, Protocol
 
 from openai import AsyncOpenAI
@@ -43,6 +44,27 @@ def _openai_sdk_base_url(configured_url: str) -> str:
     return url[: -len(suffix)] if url.endswith(suffix) else url
 
 
+def _completion_params(
+    messages: list[dict],
+    model_cfg: ModelConfig,
+    tools: Optional[list[dict]] = None,
+) -> tuple[dict, dict]:
+    params: dict = {
+        "model": model_cfg.model,
+        "messages": messages,
+        "temperature": model_cfg.temperature,
+        "max_tokens": model_cfg.max_tokens,
+        "top_p": model_cfg.top_p,
+    }
+    if tools:
+        params["tools"] = tools
+    extra: dict = {}
+    thinking = _THINKING_TO_EXTRA.get(model_cfg.thinking_level)
+    if thinking:
+        extra["extra_body"] = thinking
+    return params, extra
+
+
 class ProviderClient(Protocol):
     async def acomplete(
         self,
@@ -50,6 +72,13 @@ class ProviderClient(Protocol):
         model_cfg: ModelConfig,
         tools: Optional[list[dict]] = None,
     ) -> LLMResult: ...
+
+    def astream(
+        self,
+        messages: list[dict],
+        model_cfg: ModelConfig,
+        tools: Optional[list[dict]] = None,
+    ) -> AsyncIterator[str]: ...
 
 
 class OpenAICompatibleClient:
@@ -72,21 +101,9 @@ class OpenAICompatibleClient:
         model_cfg: ModelConfig,
         tools: Optional[list[dict]] = None,
     ) -> LLMResult:
-        extra: dict = {}
-        thinking = _THINKING_TO_EXTRA.get(model_cfg.thinking_level)
-        if thinking:
-            extra["extra_body"] = thinking
+        params, extra = _completion_params(messages, model_cfg, tools)
         start = time.monotonic()
         try:
-            params = {
-                "model": model_cfg.model,
-                "messages": messages,
-                "temperature": model_cfg.temperature,
-                "max_tokens": model_cfg.max_tokens,
-                "top_p": model_cfg.top_p,
-            }
-            if tools:
-                params["tools"] = tools
             response = await self._client.chat.completions.create(**params, **extra)
             choice = response.choices[0].message
             usage = response.usage
@@ -104,6 +121,26 @@ class OpenAICompatibleClient:
                 error=f"{type(exc).__name__}: {exc}",
                 latency_ms=int((time.monotonic() - start) * 1000),
             )
+
+    async def astream(
+        self,
+        messages: list[dict],
+        model_cfg: ModelConfig,
+        tools: Optional[list[dict]] = None,
+    ) -> AsyncIterator[str]:
+        """Yield text deltas directly from the upstream provider stream."""
+        params, extra = _completion_params(messages, model_cfg, tools)
+        stream = await self._client.chat.completions.create(
+            **params,
+            **extra,
+            stream=True,
+        )
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
 
     async def aclose(self) -> None:
         await self._client.close()
