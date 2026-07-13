@@ -40,6 +40,19 @@ _THINKING_TO_EXTRA = {
 }
 
 
+def _openai_sdk_base_url(configured_url: str) -> str:
+    """Convert a documented chat-completions endpoint into an SDK base URL.
+
+    ``AsyncOpenAI`` appends ``/chat/completions`` itself. Passing a full endpoint
+    would otherwise produce ``.../chat/completions/chat/completions``.
+    """
+    url = configured_url.rstrip("/")
+    suffix = "/chat/completions"
+    if url.endswith(suffix):
+        url = url[: -len(suffix)]
+    return url
+
+
 class ProviderClient(Protocol):
     async def acomplete(
         self,
@@ -50,13 +63,17 @@ class ProviderClient(Protocol):
 
 
 class OpenAICompatibleClient:
-    """Calls an OpenAI-compatible /chat/completions endpoint."""
+    """Calls an OpenAI-compatible chat-completions endpoint."""
 
     def __init__(self, provider: Provider):
-        api_key = os.environ.get(provider.api_key_env, provider.api_key_env)
+        api_key = os.environ.get(provider.api_key_env)
+        if not api_key:
+            raise RuntimeError(
+                f"Provider API key is missing: set environment variable {provider.api_key_env}"
+            )
         self.provider = provider
         self._client = AsyncOpenAI(
-            base_url=provider.base_url,
+            base_url=_openai_sdk_base_url(provider.base_url),
             api_key=api_key,
             timeout=120.0,
         )
@@ -82,17 +99,17 @@ class OpenAICompatibleClient:
             }
             if tools:
                 params["tools"] = tools
-            resp = await self._client.chat.completions.create(**params, **extra)
-            choice = resp.choices[0].message
-            usage = resp.usage
+            response = await self._client.chat.completions.create(**params, **extra)
+            choice = response.choices[0].message
+            usage = response.usage
             return LLMResult(
                 content=choice.content or "",
-                model=resp.model,
+                model=response.model,
                 prompt_tokens=usage.prompt_tokens if usage else 0,
                 completion_tokens=usage.completion_tokens if usage else 0,
                 latency_ms=int((time.monotonic() - start) * 1000),
             )
-        except Exception as exc:  # surface as structured error, do not crash graph
+        except Exception as exc:
             return LLMResult(
                 content="",
                 model=model_cfg.model,
