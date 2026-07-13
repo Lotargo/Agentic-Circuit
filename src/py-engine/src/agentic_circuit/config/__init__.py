@@ -2,6 +2,8 @@
 
 from .loader import (
     CircuitConfig,
+    clear_config_cache,
+    config_fingerprint,
     get_config,
     load_agent,
     load_agent_manifests,
@@ -9,11 +11,13 @@ from .loader import (
     load_manifest,
     load_meta_instruction,
     load_providers,
+    resolve_prism_manifest,
 )
 from .schema import (
     AgentConfig,
     AgentRole,
     ModelConfig,
+    PrismName,
     Provider,
     ProvidersFile,
     ToolsConfig,
@@ -22,9 +26,12 @@ from .schema import (
 __all__ = [
     "CircuitConfig",
     "get_config",
+    "clear_config_cache",
+    "config_fingerprint",
     "AgentConfig",
     "AgentRole",
     "ModelConfig",
+    "PrismName",
     "Provider",
     "ProvidersFile",
     "ToolsConfig",
@@ -34,4 +41,5 @@ __all__ = [
     "load_manifest",
     "load_meta_instruction",
     "load_providers",
+    "resolve_prism_manifest",
 ]
