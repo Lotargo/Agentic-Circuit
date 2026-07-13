@@ -1,7 +1,8 @@
-"""Qdrant-backed vector memory with hybrid retrieval.
+"""Qdrant-backed vector memory with dense + BM25 retrieval and reranking.
 
-Each circuit has an isolated collection. Dense results are hydrated from Qdrant
-payloads so memory still works after the Python process restarts.
+Each circuit has an isolated collection. Text payloads are restored from
+Qdrant at startup so both dense retrieval and the local BM25 component survive
+Python process restarts.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from .rerank import RerankClient
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6633")
 QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
-VECTOR_SIZE = 384
+VECTOR_SIZE = int(os.environ.get("EMBEDDING_VECTOR_SIZE", "384"))
 
 
 class VectorMemory:
@@ -52,6 +53,29 @@ class VectorMemory:
             self._qclient = None
         return self._qclient
 
+    def _remember_text(self, doc_id: str, text: str) -> None:
+        self._texts[doc_id] = text
+        self._bm25.add(doc_id, text)
+
+    async def _hydrate_payloads(self, client) -> None:
+        """Restore all text payloads needed by local BM25 after a restart."""
+        offset = None
+        while True:
+            points, offset = await client.scroll(
+                collection_name=self.collection,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = point.payload or {}
+                text = payload.get("text") if isinstance(payload, dict) else None
+                if isinstance(text, str):
+                    self._remember_text(str(point.id), text)
+            if offset is None:
+                break
+
     async def ensure_collection(self) -> None:
         client = self._ensure_qdrant()
         if client is None:
@@ -61,22 +85,29 @@ class VectorMemory:
 
             if not await client.collection_exists(self.collection):
                 await client.create_collection(
-                    self.collection,
+                    collection_name=self.collection,
                     vectors_config=VectorParams(
                         size=self._vector_size,
                         distance=Distance.COSINE,
                     ),
                 )
+            await self._hydrate_payloads(client)
         except Exception:
             self._qclient = None
 
     async def upsert(self, text: str, doc_id: Optional[str] = None) -> str:
         doc_id = doc_id or str(uuid.uuid4())
-        vector = (await self._embed.embed([text]))[0]
+        vector = (
+            await self._embed.embed([text], input_type="passage")
+        )[0]
+        if len(vector) != self._vector_size:
+            raise ValueError(
+                f"embedding dimension {len(vector)} does not match "
+                f"EMBEDDING_VECTOR_SIZE={self._vector_size}"
+            )
 
-        self._texts[doc_id] = text
+        self._remember_text(doc_id, text)
         self._vecs[doc_id] = vector
-        self._bm25.add(doc_id, text)
 
         client = self._ensure_qdrant()
         if client is not None:
@@ -84,7 +115,7 @@ class VectorMemory:
                 from qdrant_client.models import PointStruct
 
                 await client.upsert(
-                    self.collection,
+                    collection_name=self.collection,
                     points=[
                         PointStruct(
                             id=doc_id,
@@ -99,11 +130,19 @@ class VectorMemory:
 
     async def _dense_search(self, query: str, top_k: int) -> list[tuple[str, float]]:
         client = self._ensure_qdrant()
-        query_vector = (await self._embed.embed([query]))[0]
+        query_vector = (
+            await self._embed.embed([query], input_type="query")
+        )[0]
+        if len(query_vector) != self._vector_size:
+            raise ValueError(
+                f"embedding dimension {len(query_vector)} does not match "
+                f"EMBEDDING_VECTOR_SIZE={self._vector_size}"
+            )
+
         if client is not None:
             try:
                 hits = await client.search(
-                    self.collection,
+                    collection_name=self.collection,
                     query_vector=query_vector,
                     limit=top_k,
                     with_payload=True,
@@ -114,7 +153,7 @@ class VectorMemory:
                     payload = hit.payload or {}
                     text = payload.get("text") if isinstance(payload, dict) else None
                     if isinstance(text, str):
-                        self._texts[doc_id] = text
+                        self._remember_text(doc_id, text)
                     results.append((doc_id, float(hit.score)))
                 return results
             except Exception:
@@ -151,19 +190,25 @@ class VectorMemory:
 
         if use_rerank and self._rerank and documents:
             try:
-                ranked = await self._rerank.rerank(query, documents, top_n=top_k)
-                if ranked and ranked[0][0]:
-                    return [document for document, _ in ranked]
-                if ranked:
-                    order = sorted(
-                        range(min(len(documents), len(ranked))),
-                        key=lambda index: ranked[index][1],
-                        reverse=True,
-                    )
-                    return [documents[index] for index in order[:top_k]]
+                ranked = await self._rerank.rerank(
+                    query,
+                    documents,
+                    top_n=top_k,
+                )
+                return [document for document, _ in ranked]
             except Exception:
                 pass
         return documents[:top_k]
+
+    async def aclose(self) -> None:
+        client = self._qclient
+        self._qclient = None
+        if client is not None:
+            close = getattr(client, "close", None)
+            if close is not None:
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -190,3 +235,5 @@ class NullMemory:
         use_rerank: bool = True,
     ) -> list[str]:
         return []
+
+    async def aclose(self) -> None: ...
