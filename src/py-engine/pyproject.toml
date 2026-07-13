@@ -2,7 +2,6 @@
 name = "agentic-circuit"
 version = "0.1.0"
 description = "Multi-agent agentic circuit (chat-openwebui): router + parallel circuits + synthesis"
-readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "langgraph>=0.2.0",
@@ -17,7 +16,6 @@ dependencies = [
     "llama-index>=0.10.0",
     "fastapi>=0.110.0",
     "uvicorn>=0.30.0",
-    "sse-starlette>=2.1.0",
 ]
 
 [project.optional-dependencies]
