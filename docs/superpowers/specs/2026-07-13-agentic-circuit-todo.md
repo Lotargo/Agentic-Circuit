@@ -9,13 +9,13 @@
 
 > Текущий статус: чистая установка Python-зависимостей, pytest, TypeScript typecheck/build,
 > `docker compose config` и сборка обоих собственных Docker-образов проходят в GitHub Actions.
-> Полный запуск OpenWebUI + Qdrant + MongoDB + TEI + ColBERT с реальными ключами и моделями
-> пока не выполнялся, поэтому проект ещё нельзя считать готовым к эксплуатации.
+> Полный запуск OpenWebUI + Qdrant + TEI embedding/rerank с реальным provider API пока не
+> выполнялся, поэтому проект ещё нельзя считать готовым к эксплуатации.
 
 ## 0. Репозиторий и базовый каркас
 
 - [x] Структура каталогов (`config/`, `src/py-engine/`, `src/ts-gateway/`, `docs/`)
-- [x] README с базовым описанием и командами запуска
+- [x] README с фактической архитектурой и командами запуска
 - [x] GitHub Actions CI для Python, TypeScript, Compose и Docker build
 
 ## 1. Управление пакетами и зависимости
@@ -50,6 +50,8 @@
 - [x] Последовательные phase-1 и phase-2 внутри каждого контура
 - [x] Изоляция контуров до synthesis
 - [x] Reducer для объединения результатов и ошибок параллельных веток
+- [x] Текущий phase-1 не дублируется в phase-2 через RAG текущего же хода
+- [x] Ошибки RAG не обрушивают основной LLM flow
 - [x] Synthesis для fast и slow путей
 - [ ] Передавать полную историю диалога; сейчас используется только последнее сообщение пользователя
 
@@ -60,26 +62,30 @@
 - [x] Валидные SSE chunks без двойного `data:` и с `[DONE]`
 - [x] `GET /v1/models` для обнаружения модели OpenWebUI
 - [x] Контрактные тесты API
-- [~] Python-сервис является собственным FastAPI API, а не LangServe runtime, заявленным в исходной спецификации
+- [~] Ответ вычисляется полностью и затем нарезается на chunks; настоящего token streaming нет
+- [~] Python-сервис является собственным FastAPI API, а не LangServe runtime из исходной спецификации
 
 ## 6. RAG и память
 
 - [x] Per-circuit коллекции Qdrant
-- [x] Dense embedding через HTTP sidecar
-- [x] In-process BM25
-- [x] Опциональный rerank через HTTP sidecar
+- [x] Dense embedding через TEI HTTP sidecar
+- [x] Корректные `query:` / `passage:` префиксы для multilingual E5
+- [x] In-process BM25 с idempotent update
+- [x] Восстановление текстов и BM25 из Qdrant payload после рестарта
 - [x] Reciprocal-rank fusion dense + BM25
-- [x] Чтение `text` из Qdrant payload после рестарта процесса
+- [x] TEI cross-encoder rerank через контракт `query + texts + return_text`
+- [x] Поддерживаемый мультиязычный reranker `Alibaba-NLP/gte-multilingual-reranker-base`
 - [x] Composite retrieval всех коллекций для synthesis
 - [~] `MongoStore` существует, но не подключён к основному графу
-- [ ] Проверить живой Qdrant/TEI/ColBERT flow на реальных контейнерах и моделях
+- [ ] Настоящий ColBERT late interaction через token-level multi-vectors и MaxSim
+- [ ] Проверить живой Qdrant/TEI flow на реальных контейнерах и моделях
 
 ## 7. Web-поиск
 
 - [x] Web-поиск включён только у synthesis
 - [x] Вызов LangSearch API реализован напрямую через `httpx`
-- [x] Ошибка web-поиска не обрушает весь граф и попадает в список ошибок
-- [ ] Добавить фактический rerank результатов web-поиска; текущий ColBERT rerank применяется только к RAG-документам
+- [x] Ошибка web-поиска не обрушает весь граф
+- [ ] Добавить rerank результатов web-поиска; текущий cross-encoder применяется только к RAG-документам
 
 ## 8. TS-шлюз
 
@@ -89,35 +95,44 @@
 - [x] `GET/POST/DELETE /v1/providers`
 - [x] Корректный путь к `providers.yaml` локально и в контейнере
 - [x] Атомарная запись YAML через временный файл
-- [~] Vercel AI SDK не участвует в runtime; исходное утверждение о «формировании OpenAI-ответа через `@ai-sdk/openai-compatible`» было неверным
+- [~] `/v1/providers` не имеет отдельной авторизации
+- [~] Vercel AI SDK не участвует в runtime; исходное утверждение о формировании OpenAI-ответа через него было неверным
 
 ## 9. Docker Compose
 
-- [x] Общая сеть, volumes и отдельные контейнеры
+- [x] Общая сеть и persistent volumes
 - [x] CPU-first основной `docker-compose.yml`
 - [x] Отдельный `docker-compose.gpu.yml` с NVIDIA reservations
+- [x] Актуальные TEI image tags серии 1.9
+- [x] Persistent model cache volumes для embedding и rerank sidecars
+- [x] Healthchecks `py-engine` и `ts-gateway`
+- [x] OpenWebUI ожидает здоровый TS gateway, TS gateway ожидает здоровый Python engine
 - [x] Сборка `py-engine` в чистом Docker build
-- [x] Сборка скомпилированного `ts-gateway` в multi-stage Docker build
+- [x] Сборка `ts-gateway` в multi-stage Docker build
 - [x] `docker compose config` проходит в CI
+- [~] Qdrant и TEI sidecars пока подключены через start-order, без собственных Compose health conditions
 - [ ] Полный `docker compose up` и health-check всех сервисов
 - [ ] Smoke-test OpenWebUI -> TS gateway -> Python engine -> реальный provider
 
 ## 10. Автоматические проверки
 
-- [x] Тесты загрузки конфигурации и prompt assembly
-- [x] Интеграционные тесты fast/slow и изоляции контуров
-- [x] Тест OpenAI-compatible API и SSE
-- [x] Тест нормализации provider endpoint
-- [x] Тест persistent Qdrant payload retrieval
+- [x] Загрузка конфигурации и prompt assembly
+- [x] Fast/slow, изоляция контуров и synthesis
+- [x] OpenAI-compatible API и SSE
+- [x] Нормализация provider endpoint
+- [x] TEI embedding payload и E5 prefixes
+- [x] TEI rerank request/response contract
+- [x] Persistent Qdrant payload и BM25 hydration
 - [x] TypeScript typecheck и production build
 - [x] Docker build обоих собственных сервисов
 
 ## 11. До состояния рабочего MVP
 
-- [ ] Выбрать и закрепить одну транспортную архитектуру: LangServe invoke/stream или собственный OpenAI-compatible FastAPI API
+- [ ] Выбрать одну транспортную архитектуру: LangServe invoke/stream или собственный OpenAI-compatible FastAPI API
 - [ ] Реализовать hot reload provider config либо явно возвращать `restart_required`
 - [ ] Реализовать выбор активной эмоциональной призмы
 - [ ] Передавать историю чата, а не только последнее сообщение
 - [ ] Подключить MongoDB к реальному data flow либо убрать её из обязательного стека
-- [ ] Добавить healthchecks/readiness и ожидание готовности зависимостей вместо одного `depends_on`
+- [ ] Добавить readiness Qdrant/TEI вместо одного start-order
+- [ ] Определиться: настоящий ColBERT multi-vector или поддерживаемый cross-encoder
 - [ ] Провести полный живой smoke-test и зафиксировать результат
