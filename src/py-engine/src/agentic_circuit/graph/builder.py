@@ -1,4 +1,4 @@
-"""LangGraph circuit: router -> parallel circuits (phase1/phase2) -> synthesis."""
+"""LangGraph circuit: router -> parallel circuits -> streamed synthesis."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Send
+from langgraph.types import Send, StreamWriter
 
 from ..config import CircuitConfig
 from ..providers import ClientRegistry
@@ -87,8 +87,7 @@ class CompositeMemory:
 
 
 def _parse_route(raw: str) -> str:
-    tokens = re.findall(r"[a-z]+", (raw or "").lower())
-    return "slow" if tokens == ["slow"] else "fast"
+    return "slow" if re.findall(r"[a-z]+", (raw or "").lower()) == ["slow"] else "fast"
 
 
 async def _safe_retrieve(memory, query: str, label: str, errors: list[str]) -> list[str]:
@@ -127,7 +126,6 @@ def build_graph(ctx: EngineContext):
         errors: list[str] = []
         prism = state.get("prism") or "neutral"
         conversation = state["conversation"]
-
         historical = (
             await _safe_retrieve(memory, state["user_input"], f"{circuit}:rag_retrieve", errors)
             if phase1.tools.rag or phase2.tools.rag
@@ -139,7 +137,6 @@ def build_graph(ctx: EngineContext):
         )
         if result1.error:
             errors.append(f"{circuit}-1: {result1.error}")
-
         result2 = await ctx.clients.get(phase2.model.provider).acomplete(
             phase2_messages(
                 phase2,
@@ -152,12 +149,10 @@ def build_graph(ctx: EngineContext):
         )
         if result2.error:
             errors.append(f"{circuit}-2: {result2.error}")
-
         if phase1.tools.rag and result1.content:
             await _safe_upsert(memory, result1.content, f"{circuit}-1:rag_upsert", errors)
         if phase2.tools.rag and result2.content:
             await _safe_upsert(memory, result2.content, f"{circuit}-2:rag_upsert", errors)
-
         update: dict = {
             "circuit_phase1": {circuit: result1.content},
             "circuit_phase2": {circuit: result2.content},
@@ -166,12 +161,15 @@ def build_graph(ctx: EngineContext):
             update["errors"] = errors
         return update
 
-    async def synthesis_node(state: CircuitState) -> dict:
+    async def synthesis_node(state: CircuitState, *, writer: StreamWriter) -> dict:
         agent = ctx.config.synthesis
         errors: list[str] = []
         contexts = (
             await _safe_retrieve(
-                ctx.synthesis_memory, state["user_input"], "synthesis:rag_retrieve", errors
+                ctx.synthesis_memory,
+                state["user_input"],
+                "synthesis:rag_retrieve",
+                errors,
             )
             if ctx.synthesis_memory and agent.tools.rag
             else []
@@ -190,21 +188,34 @@ def build_graph(ctx: EngineContext):
             except Exception as exc:
                 errors.append(f"web_search: {type(exc).__name__}: {exc}")
 
-        result = await ctx.clients.get(agent.model.provider).acomplete(
-            synthesis_messages(
-                agent,
-                state["conversation"],
-                state.get("circuit_phase1", {}),
-                state.get("circuit_phase2", {}),
-                contexts,
-                web_results,
-                state.get("prism") or "neutral",
-            ),
-            agent.model,
+        messages = synthesis_messages(
+            agent,
+            state["conversation"],
+            state.get("circuit_phase1", {}),
+            state.get("circuit_phase2", {}),
+            contexts,
+            web_results,
+            state.get("prism") or "neutral",
         )
-        update: dict = {"synthesis_output": result.content}
-        if result.error:
-            errors.append(f"synthesis: {result.error}")
+        client = ctx.clients.get(agent.model.provider)
+        chunks: list[str] = []
+        stream_method = getattr(client, "astream", None)
+        if stream_method is not None:
+            try:
+                async for token in stream_method(messages, agent.model):
+                    chunks.append(token)
+                    writer({"type": "token", "content": token})
+            except Exception as exc:
+                errors.append(f"synthesis_stream: {type(exc).__name__}: {exc}")
+        if not chunks:
+            result = await client.acomplete(messages, agent.model)
+            if result.content:
+                chunks.append(result.content)
+                writer({"type": "token", "content": result.content})
+            if result.error:
+                errors.append(f"synthesis: {result.error}")
+
+        update: dict = {"synthesis_output": "".join(chunks)}
         if errors:
             update["errors"] = errors
         return update
