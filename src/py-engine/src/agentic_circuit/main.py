@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from .config import CircuitConfig, PrismName, config_fingerprint
+from .config import CircuitConfig, config_fingerprint
 from .graph import CompositeMemory, EngineContext, build_graph
 from .providers import ClientRegistry
 from .rag import EmbeddingClient, RerankClient, VectorMemory
@@ -31,10 +31,7 @@ def _build_context() -> EngineContext:
     rerank = RerankClient() if os.environ.get("RERANK_SIDECAR_URL") else None
     web = WebSearchTool() if os.environ.get("LANGSEARCH_API_KEY") else None
     circuits = sorted({agent.circuit for agent in config.agents.values() if agent.circuit})
-    memories = {
-        circuit: VectorMemory(circuit, embeddings, rerank)
-        for circuit in circuits
-    }
+    memories = {circuit: VectorMemory(circuit, embeddings, rerank) for circuit in circuits}
     return EngineContext(
         config=config,
         clients=clients,
@@ -46,9 +43,20 @@ def _build_context() -> EngineContext:
     )
 
 
+async def _initialize_memories(context: EngineContext) -> None:
+    for memory in context.memories.values():
+        try:
+            await memory.ensure_collection()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
 class Runtime:
     def __init__(self):
         self._lock = asyncio.Lock()
+        self._init_task: asyncio.Task | None = None
         self.fingerprint = ""
         self.context: EngineContext | None = None
         self.graph = None
@@ -61,20 +69,32 @@ class Runtime:
             current = config_fingerprint()
             if self.graph is not None and current == self.fingerprint:
                 return
-            old = self.context
+
+            old_context = self.context
+            old_task = self._init_task
             context = _build_context()
-            for memory in context.memories.values():
-                try:
-                    await memory.ensure_collection()
-                except Exception:
-                    pass
             self.context = context
             self.graph = build_graph(context)
             self.fingerprint = current
-            if old is not None:
-                await old.aclose()
+            self._init_task = asyncio.create_task(_initialize_memories(context))
+
+            if old_task is not None:
+                old_task.cancel()
+                try:
+                    await old_task
+                except asyncio.CancelledError:
+                    pass
+            if old_context is not None:
+                await old_context.aclose()
 
     async def close(self) -> None:
+        if self._init_task is not None:
+            self._init_task.cancel()
+            try:
+                await self._init_task
+            except asyncio.CancelledError:
+                pass
+            self._init_task = None
         if self.context:
             await self.context.aclose()
             self.context = None
@@ -214,6 +234,7 @@ async def healthz() -> dict:
     return {
         "status": "ok",
         "config_fingerprint": RUNTIME.fingerprint,
+        "rag_initializing": bool(RUNTIME._init_task and not RUNTIME._init_task.done()),
         "circuits": sorted(RUNTIME.context.memories.keys()) if RUNTIME.context else [],
     }
 
