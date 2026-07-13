@@ -69,7 +69,6 @@ class Runtime:
             current = config_fingerprint()
             if self.graph is not None and current == self.fingerprint:
                 return
-
             old_context = self.context
             old_task = self._init_task
             context = _build_context()
@@ -77,7 +76,6 @@ class Runtime:
             self.graph = build_graph(context)
             self.fingerprint = current
             self._init_task = asyncio.create_task(_initialize_memories(context))
-
             if old_task is not None:
                 old_task.cancel()
                 try:
@@ -142,20 +140,35 @@ def _normalize_conversation(messages: object) -> list[dict]:
     return conversation
 
 
+def _graph_input(conversation: list[dict], prism: str) -> dict:
+    return {
+        "user_input": conversation[-1]["content"],
+        "conversation": conversation,
+        "prism": prism,
+    }
+
+
 async def _run(conversation: list[dict], prism: str) -> str:
     await RUNTIME.ensure_current()
-    result = await RUNTIME.graph.ainvoke(
-        {
-            "user_input": conversation[-1]["content"],
-            "conversation": conversation,
-            "prism": prism,
-        }
-    )
+    result = await RUNTIME.graph.ainvoke(_graph_input(conversation, prism))
     answer = result.get("synthesis_output", "")
     if not answer:
         errors = result.get("errors") or ["synthesis returned an empty response"]
         raise RuntimeError("; ".join(str(error) for error in errors))
     return answer
+
+
+async def _stream(conversation: list[dict], prism: str) -> AsyncIterator[str]:
+    """Yield synthesis deltas as soon as the upstream model emits them."""
+    await RUNTIME.ensure_current()
+    async for event in RUNTIME.graph.astream(
+        _graph_input(conversation, prism),
+        stream_mode="custom",
+    ):
+        if isinstance(event, dict) and event.get("type") == "token":
+            content = event.get("content")
+            if isinstance(content, str) and content:
+                yield content
 
 
 def _chunk_payload(*, request_id: str, created: int, model: str, text: str = "", finish_reason: str | None = None) -> str:
@@ -196,20 +209,34 @@ async def chat_completions(request: Request):
     if prism not in ALLOWED_PRISMS:
         raise HTTPException(status_code=400, detail=f"unsupported prism: {prism}")
 
-    try:
-        answer = await _run(conversation, prism)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"engine failed: {exc}") from exc
-
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     model = str(body.get("model") or LOGICAL_MODEL_ID)
 
     if bool(body.get("stream", False)):
         async def event_gen() -> AsyncIterator[str]:
-            for offset in range(0, len(answer), 48):
-                yield _chunk_payload(request_id=request_id, created=created, model=model, text=answer[offset : offset + 48])
-            yield _chunk_payload(request_id=request_id, created=created, model=model, finish_reason="stop")
+            try:
+                async for token in _stream(conversation, prism):
+                    yield _chunk_payload(
+                        request_id=request_id,
+                        created=created,
+                        model=model,
+                        text=token,
+                    )
+                yield _chunk_payload(
+                    request_id=request_id,
+                    created=created,
+                    model=model,
+                    finish_reason="stop",
+                )
+            except Exception as exc:
+                error = {
+                    "error": {
+                        "message": f"engine stream failed: {exc}",
+                        "type": "engine_error",
+                    }
+                }
+                yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(
@@ -217,6 +244,11 @@ async def chat_completions(request: Request):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
+
+    try:
+        answer = await _run(conversation, prism)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"engine failed: {exc}") from exc
 
     return {
         "id": request_id,
