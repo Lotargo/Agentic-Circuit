@@ -13,12 +13,7 @@ from ..config import CircuitConfig
 from ..providers import ClientRegistry
 from ..rag import EmbeddingClient, RerankClient, VectorMemory
 from ..tools import WebSearchTool
-from .prompts import (
-    phase1_messages,
-    phase2_messages,
-    router_messages,
-    synthesis_messages,
-)
+from .prompts import phase1_messages, phase2_messages, router_messages, synthesis_messages
 
 
 def _merge(left, right):
@@ -35,6 +30,8 @@ def _merge_errors(left, right):
 
 class CircuitState(TypedDict, total=False):
     user_input: str
+    conversation: list[dict]
+    prism: str
     route: str
     router_raw: str
     circuit: str
@@ -54,10 +51,21 @@ class EngineContext:
     memories: dict[str, VectorMemory] = field(default_factory=dict)
     synthesis_memory: Optional[object] = None
 
+    async def aclose(self) -> None:
+        close = getattr(self.clients, "aclose", None)
+        if close:
+            await close()
+        if self.embeddings:
+            await self.embeddings.aclose()
+        if self.rerank:
+            await self.rerank.aclose()
+        if self.web:
+            await self.web.aclose()
+        for memory in self.memories.values():
+            await memory.aclose()
+
 
 class CompositeMemory:
-    """Synthesis retriever over every circuit collection."""
-
     def __init__(self, memories: list[VectorMemory]):
         self.memories = memories
 
@@ -65,32 +73,17 @@ class CompositeMemory:
         for memory in self.memories:
             await memory.ensure_collection()
 
-    async def retrieve(
-        self,
-        query: str,
-        top_k: int = 5,
-        use_rerank: bool = True,
-    ) -> list[str]:
+    async def retrieve(self, query: str, top_k: int = 5, use_rerank: bool = True) -> list[str]:
         if not self.memories:
             return []
         per_collection = max(1, top_k // len(self.memories))
         results: list[str] = []
         for memory in self.memories:
-            results.extend(
-                await memory.retrieve(
-                    query,
-                    top_k=per_collection,
-                    use_rerank=use_rerank,
-                )
-            )
+            results.extend(await memory.retrieve(query, per_collection, use_rerank))
         return results[:top_k]
 
     async def upsert(self, text: str, doc_id: Optional[str] = None) -> str:
         return ""
-
-    async def aclose(self) -> None:
-        for memory in self.memories:
-            await memory.aclose()
 
 
 def _parse_route(raw: str) -> str:
@@ -98,12 +91,7 @@ def _parse_route(raw: str) -> str:
     return "slow" if tokens == ["slow"] else "fast"
 
 
-async def _safe_retrieve(
-    memory,
-    query: str,
-    label: str,
-    errors: list[str],
-) -> list[str]:
+async def _safe_retrieve(memory, query: str, label: str, errors: list[str]) -> list[str]:
     try:
         return await memory.retrieve(query)
     except Exception as exc:
@@ -111,12 +99,7 @@ async def _safe_retrieve(
         return []
 
 
-async def _safe_upsert(
-    memory,
-    text: str,
-    label: str,
-    errors: list[str],
-) -> None:
+async def _safe_upsert(memory, text: str, label: str, errors: list[str]) -> None:
     try:
         await memory.upsert(text)
     except Exception as exc:
@@ -124,20 +107,14 @@ async def _safe_upsert(
 
 
 def build_graph(ctx: EngineContext):
-    circuits = sorted(
-        {agent.circuit for agent in ctx.config.agents.values() if agent.circuit}
-    )
+    circuits = sorted({agent.circuit for agent in ctx.config.agents.values() if agent.circuit})
 
     async def router_node(state: CircuitState) -> dict:
         agent = ctx.config.router
         result = await ctx.clients.get(agent.model.provider).acomplete(
-            router_messages(agent, state["user_input"]),
-            agent.model,
+            router_messages(agent, state["user_input"]), agent.model
         )
-        update: dict = {
-            "router_raw": result.content,
-            "route": _parse_route(result.content),
-        }
+        update: dict = {"router_raw": result.content, "route": _parse_route(result.content)}
         if result.error:
             update["errors"] = [f"router: {result.error}"]
         return update
@@ -148,27 +125,16 @@ def build_graph(ctx: EngineContext):
         phase2 = ctx.config.get(f"{circuit}-2")
         memory = ctx.memories[circuit]
         errors: list[str] = []
+        prism = state.get("prism") or "neutral"
+        conversation = state["conversation"]
 
-        # Retrieve historical context before producing either current answer.
-        # Otherwise phase-1 is immediately stored and then duplicated inside the
-        # phase-2 prompt both as "raw answer" and as a retrieved memory.
-        historical_contexts = (
-            await _safe_retrieve(
-                memory,
-                state["user_input"],
-                f"{circuit}:rag_retrieve",
-                errors,
-            )
+        historical = (
+            await _safe_retrieve(memory, state["user_input"], f"{circuit}:rag_retrieve", errors)
             if phase1.tools.rag or phase2.tools.rag
             else []
         )
-
         result1 = await ctx.clients.get(phase1.model.provider).acomplete(
-            phase1_messages(
-                phase1,
-                state["user_input"],
-                historical_contexts if phase1.tools.rag else [],
-            ),
+            phase1_messages(phase1, conversation, historical if phase1.tools.rag else [], prism),
             phase1.model,
         )
         if result1.error:
@@ -177,31 +143,20 @@ def build_graph(ctx: EngineContext):
         result2 = await ctx.clients.get(phase2.model.provider).acomplete(
             phase2_messages(
                 phase2,
-                state["user_input"],
+                conversation,
                 result1.content,
-                historical_contexts if phase2.tools.rag else [],
+                historical if phase2.tools.rag else [],
+                prism,
             ),
             phase2.model,
         )
         if result2.error:
             errors.append(f"{circuit}-2: {result2.error}")
 
-        # Persist only after both phases have finished, so current-turn output
-        # becomes memory for future turns rather than contaminating this turn.
         if phase1.tools.rag and result1.content:
-            await _safe_upsert(
-                memory,
-                result1.content,
-                f"{circuit}-1:rag_upsert",
-                errors,
-            )
+            await _safe_upsert(memory, result1.content, f"{circuit}-1:rag_upsert", errors)
         if phase2.tools.rag and result2.content:
-            await _safe_upsert(
-                memory,
-                result2.content,
-                f"{circuit}-2:rag_upsert",
-                errors,
-            )
+            await _safe_upsert(memory, result2.content, f"{circuit}-2:rag_upsert", errors)
 
         update: dict = {
             "circuit_phase1": {circuit: result1.content},
@@ -216,30 +171,34 @@ def build_graph(ctx: EngineContext):
         errors: list[str] = []
         contexts = (
             await _safe_retrieve(
-                ctx.synthesis_memory,
-                state["user_input"],
-                "synthesis:rag_retrieve",
-                errors,
+                ctx.synthesis_memory, state["user_input"], "synthesis:rag_retrieve", errors
             )
             if ctx.synthesis_memory and agent.tools.rag
             else []
         )
-
         web_results: list[str] = []
         if agent.tools.web_search and ctx.web:
             try:
                 web_results = await ctx.web.search(state["user_input"])
+                if ctx.rerank and web_results:
+                    web_results = [
+                        text
+                        for text, _ in await ctx.rerank.rerank(
+                            state["user_input"], web_results, top_n=5
+                        )
+                    ]
             except Exception as exc:
                 errors.append(f"web_search: {type(exc).__name__}: {exc}")
 
         result = await ctx.clients.get(agent.model.provider).acomplete(
             synthesis_messages(
                 agent,
-                state["user_input"],
+                state["conversation"],
                 state.get("circuit_phase1", {}),
                 state.get("circuit_phase2", {}),
                 contexts,
                 web_results,
+                state.get("prism") or "neutral",
             ),
             agent.model,
         )
@@ -255,7 +214,12 @@ def build_graph(ctx: EngineContext):
             return [
                 Send(
                     "circuit",
-                    {"circuit": circuit, "user_input": state["user_input"]},
+                    {
+                        "circuit": circuit,
+                        "user_input": state["user_input"],
+                        "conversation": state["conversation"],
+                        "prism": state.get("prism") or "neutral",
+                    },
                 )
                 for circuit in circuits
             ]
