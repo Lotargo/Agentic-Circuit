@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Annotated, Optional, TypedDict
 
@@ -20,12 +21,18 @@ from .prompts import (
 )
 
 
-def _merge(left, right):  # reducer for parallel circuit writes
+def _merge(left, right):
+    """Merge dictionaries written by parallel circuit branches."""
     if not left:
         return right or {}
     if not right:
         return left
     return {**left, **right}
+
+
+def _merge_errors(left, right):
+    """Collect errors from parallel branches instead of causing a state conflict."""
+    return list(left or []) + list(right or [])
 
 
 class CircuitState(TypedDict, total=False):
@@ -36,7 +43,7 @@ class CircuitState(TypedDict, total=False):
     circuit_phase1: Annotated[dict[str, str], _merge]
     circuit_phase2: Annotated[dict[str, str], _merge]
     synthesis_output: str
-    errors: list[str]
+    errors: Annotated[list[str], _merge_errors]
 
 
 @dataclass
@@ -57,68 +64,81 @@ class CompositeMemory:
         self.memories = memories
 
     async def ensure_collection(self) -> None:
-        for m in self.memories:
-            await m.ensure_collection()
+        for memory in self.memories:
+            await memory.ensure_collection()
 
     async def retrieve(self, query: str, top_k: int = 5, use_rerank: bool = True) -> list[str]:
         if not self.memories:
             return []
-        per = max(1, top_k // len(self.memories))
-        out: list[str] = []
-        for m in self.memories:
-            out.extend(await m.retrieve(query, top_k=per, use_rerank=use_rerank))
-        return out[:top_k]
+        per_collection = max(1, top_k // len(self.memories))
+        results: list[str] = []
+        for memory in self.memories:
+            results.extend(
+                await memory.retrieve(
+                    query,
+                    top_k=per_collection,
+                    use_rerank=use_rerank,
+                )
+            )
+        return results[:top_k]
 
     async def upsert(self, text: str, doc_id: Optional[str] = None) -> str:
         return ""
 
 
 def _parse_route(raw: str) -> str:
-    text = (raw or "").lower()
-    return "slow" if "slow" in text else "fast"
+    """Accept only an unambiguous router decision; default safely to fast."""
+    tokens = re.findall(r"[a-z]+", (raw or "").lower())
+    if tokens == ["slow"]:
+        return "slow"
+    return "fast"
 
 
 def build_graph(ctx: EngineContext):
-    circuits = sorted({a.circuit for a in ctx.config.agents.values() if a.circuit})
+    circuits = sorted({agent.circuit for agent in ctx.config.agents.values() if agent.circuit})
 
     async def router_node(state: CircuitState) -> dict:
         agent = ctx.config.router
-        msgs = router_messages(state["user_input"])
-        res = await ctx.clients.get(agent.model.provider).acomplete(msgs, agent.model)
-        route = _parse_route(res.content)
-        update: dict = {"router_raw": res.content, "route": route}
-        if res.error:
-            update.setdefault("errors", []).append(f"router: {res.error}")
+        messages = router_messages(agent, state["user_input"])
+        result = await ctx.clients.get(agent.model.provider).acomplete(messages, agent.model)
+        update: dict = {
+            "router_raw": result.content,
+            "route": _parse_route(result.content),
+        }
+        if result.error:
+            update["errors"] = [f"router: {result.error}"]
         return update
 
     async def circuit_node(state: CircuitState) -> dict:
         circuit = state["circuit"]
-        p1 = ctx.config.get(f"{circuit}-1")
-        p2 = ctx.config.get(f"{circuit}-2")
-        mem = ctx.memories[circuit]
+        phase1 = ctx.config.get(f"{circuit}-1")
+        phase2 = ctx.config.get(f"{circuit}-2")
+        memory = ctx.memories[circuit]
         errors: list[str] = []
 
-        c1 = await mem.retrieve(state["user_input"]) if p1.tools.rag else []
-        r1 = await ctx.clients.get(p1.model.provider).acomplete(
-            phase1_messages(p1, state["user_input"], c1), p1.model
+        contexts1 = await memory.retrieve(state["user_input"]) if phase1.tools.rag else []
+        result1 = await ctx.clients.get(phase1.model.provider).acomplete(
+            phase1_messages(phase1, state["user_input"], contexts1),
+            phase1.model,
         )
-        if p1.tools.rag and r1.content:
-            await mem.upsert(r1.content)
-        if r1.error:
-            errors.append(f"{circuit}-1: {r1.error}")
+        if phase1.tools.rag and result1.content:
+            await memory.upsert(result1.content)
+        if result1.error:
+            errors.append(f"{circuit}-1: {result1.error}")
 
-        c2 = await mem.retrieve(state["user_input"]) if p2.tools.rag else []
-        r2 = await ctx.clients.get(p2.model.provider).acomplete(
-            phase2_messages(p2, state["user_input"], r1.content, c2), p2.model
+        contexts2 = await memory.retrieve(state["user_input"]) if phase2.tools.rag else []
+        result2 = await ctx.clients.get(phase2.model.provider).acomplete(
+            phase2_messages(phase2, state["user_input"], result1.content, contexts2),
+            phase2.model,
         )
-        if p2.tools.rag and r2.content:
-            await mem.upsert(r2.content)
-        if r2.error:
-            errors.append(f"{circuit}-2: {r2.error}")
+        if phase2.tools.rag and result2.content:
+            await memory.upsert(result2.content)
+        if result2.error:
+            errors.append(f"{circuit}-2: {result2.error}")
 
-        update = {
-            "circuit_phase1": {circuit: r1.content},
-            "circuit_phase2": {circuit: r2.content},
+        update: dict = {
+            "circuit_phase1": {circuit: result1.content},
+            "circuit_phase2": {circuit: result2.content},
         }
         if errors:
             update["errors"] = errors
@@ -126,41 +146,52 @@ def build_graph(ctx: EngineContext):
 
     async def synthesis_node(state: CircuitState) -> dict:
         agent = ctx.config.synthesis
-        mem = ctx.synthesis_memory
-        contexts = await mem.retrieve(state["user_input"]) if (mem and agent.tools.rag) else []
-        web: list[str] = []
+        memory = ctx.synthesis_memory
+        contexts = (
+            await memory.retrieve(state["user_input"])
+            if memory and agent.tools.rag
+            else []
+        )
+        web_results: list[str] = []
+        errors: list[str] = []
         if agent.tools.web_search and ctx.web:
             try:
-                web = await ctx.web.search(state["user_input"])
-            except Exception as exc:  # non-fatal
-                web = []
-        res = await ctx.clients.get(agent.model.provider).acomplete(
+                web_results = await ctx.web.search(state["user_input"])
+            except Exception as exc:
+                errors.append(f"web_search: {type(exc).__name__}: {exc}")
+
+        result = await ctx.clients.get(agent.model.provider).acomplete(
             synthesis_messages(
                 agent,
                 state["user_input"],
                 state.get("circuit_phase1", {}),
                 state.get("circuit_phase2", {}),
                 contexts,
-                web,
+                web_results,
             ),
             agent.model,
         )
-        update: dict = {"synthesis_output": res.content}
-        if res.error:
-            update["errors"] = [f"synthesis: {res.error}"]
+        update: dict = {"synthesis_output": result.content}
+        if result.error:
+            errors.append(f"synthesis: {result.error}")
+        if errors:
+            update["errors"] = errors
         return update
 
     def route_decision(state: CircuitState):
         if state.get("route") == "slow":
-            return [Send("circuit", {"circuit": c, "user_input": state["user_input"]}) for c in circuits]
+            return [
+                Send("circuit", {"circuit": circuit, "user_input": state["user_input"]})
+                for circuit in circuits
+            ]
         return "fast"
 
-    g = StateGraph(CircuitState)
-    g.add_node("router", router_node)
-    g.add_node("circuit", circuit_node)
-    g.add_node("synthesis", synthesis_node)
-    g.add_edge(START, "router")
-    g.add_conditional_edges("router", route_decision, {"fast": "synthesis"})
-    g.add_edge("circuit", "synthesis")
-    g.add_edge("synthesis", END)
-    return g.compile()
+    graph = StateGraph(CircuitState)
+    graph.add_node("router", router_node)
+    graph.add_node("circuit", circuit_node)
+    graph.add_node("synthesis", synthesis_node)
+    graph.add_edge(START, "router")
+    graph.add_conditional_edges("router", route_decision, {"fast": "synthesis"})
+    graph.add_edge("circuit", "synthesis")
+    graph.add_edge("synthesis", END)
+    return graph.compile()
