@@ -5,7 +5,7 @@
 - **fast**: router сразу передаёт запрос synthesis;
 - **slow**: creative, pragmatic и effective выполняются параллельно, каждый проходит phase-1 и phase-2, затем synthesis собирает единый ответ.
 
-## Фактическая архитектура
+## Архитектура
 
 ```text
 OpenWebUI
@@ -20,24 +20,44 @@ Python engine (FastAPI + LangGraph)
              pragmatic phase1/2 ────┼─> synthesis
              effective phase1/2 ────┘
                      │
-                     ├─ Qdrant + embedding/rerank sidecars
+                     ├─ Qdrant + TEI embedding
+                     ├─ TEI cross-encoder rerank
                      └─ optional LangSearch HTTP API
 ```
 
-- **Python engine** (`src/py-engine`): LangGraph, FastAPI, OpenAI-compatible provider client, Qdrant, BM25 и HTTP-клиенты embedding/rerank/web-search.
-- **TS gateway** (`src/ts-gateway`): прозрачный Express proxy для `/v1/models` и `/v1/chat/completions`, а также CRUD `/v1/providers`.
-- **Config** (`config/`): `providers.yaml`, `agents/*.yaml`, `manifests/<agent>/<prism>.md`.
-- **OpenWebUI** подключается к TS gateway как к OpenAI-compatible backend.
+Фактические решения:
 
-Исходная спецификация упоминает LangServe, LlamaIndex и использование Vercel AI SDK в runtime. Текущая реализация их не использует. Подробности и оставшиеся расхождения находятся в `docs/superpowers/specs/2026-07-14-implementation-audit.md`.
+- Python transport: собственный OpenAI-compatible FastAPI API, не LangServe.
+- TS gateway: прозрачный Express proxy. Vercel AI SDK не используется и удалён из зависимостей.
+- Rerank: поддерживаемый TEI cross-encoder `Alibaba-NLP/gte-multilingual-reranker-base`, не псевдо-ColBERT.
+- MongoDB удалён из обязательного runtime, потому что не участвовал в data flow.
+- Python-зависимости зафиксированы в `src/py-engine/uv.lock`, Node-зависимости — в `package-lock.json`.
+
+## Диалог и эмоциональные призмы
+
+В Python engine передаётся полная история `user/assistant`, а не только последнее сообщение. Запрос может содержать поле `prism`:
+
+```json
+{
+  "model": "agentic-circuit",
+  "prism": "joy",
+  "messages": [
+    {"role": "user", "content": "Меня зовут Олег"},
+    {"role": "assistant", "content": "Запомнила"},
+    {"role": "user", "content": "Как меня зовут?"}
+  ]
+}
+```
+
+Допустимые значения: `joy`, `flirt`, `resentment`, `arousal`, `anger`, `apathy`, `neutral`, `sadness`. В prompt добавляется ровно одна активная призма.
 
 ## Локальный запуск
-
-Скопируйте env-файл и заполните как минимум ключ провайдера:
 
 ```bash
 cp .env.example .env
 ```
+
+Заполните ключ provider и замените `PROVIDERS_ADMIN_TOKEN` длинным случайным секретом.
 
 CPU-first запуск:
 
@@ -45,7 +65,7 @@ CPU-first запуск:
 docker compose up --build
 ```
 
-Запуск с NVIDIA GPU override:
+NVIDIA override:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
@@ -57,17 +77,32 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 - TS gateway: `http://localhost:9191`
 - Python engine: `http://localhost:8823`
 
-Основной Compose больше не требует NVIDIA runtime. GPU reservations находятся только в `docker-compose.gpu.yml`.
+RAG инициализируется в фоне и не блокирует запуск API. Если Qdrant или TEI ещё не готовы, LLM flow продолжает работать без RAG-контекста, а ошибки фиксируются внутри состояния графа.
 
-## Разработка без Docker
+## Управление провайдерами
+
+`GET/POST/DELETE /v1/providers` требуют секрет из `PROVIDERS_ADMIN_TOKEN`:
+
+```text
+X-Admin-Token: <secret>
+```
+
+или:
+
+```text
+Authorization: Bearer <secret>
+```
+
+После изменения `providers.yaml` gateway вызывает `/v1/reload`; Python engine перестраивает registry и граф без перезапуска контейнера.
+
+## Разработка
 
 Python:
 
 ```bash
 cd src/py-engine
-uv venv
-uv pip install -e ".[test]"
-uv run pytest
+uv sync --frozen --extra test
+uv run --frozen pytest
 ```
 
 TypeScript:
@@ -80,13 +115,15 @@ npm run build
 npm run dev
 ```
 
-## Автоматические проверки
+## CI
 
-GitHub Actions выполняет:
+GitHub Actions проверяет:
 
-- установку Python-пакета и pytest;
+- актуальность `uv.lock`;
+- Python pytest;
 - TypeScript typecheck и production build;
 - `docker compose config`;
-- чистую сборку Docker-образов `py-engine` и `ts-gateway`.
+- чистую сборку Docker-образов Python engine и TS gateway;
+- реальный HTTP smoke flow: mock OpenAI-compatible provider → Python engine → TS gateway → финальный completion.
 
-CI не заменяет полный smoke-test с загруженными моделями, реальным provider API и интерфейсом OpenWebUI. Актуальный статус находится в `docs/superpowers/specs/2026-07-13-agentic-circuit-todo.md`.
+Smoke-test использует полную историю сообщений и выбранную prism. Полный запуск тяжёлых Qdrant/TEI/OpenWebUI-контейнеров с загрузкой моделей остаётся отдельной локальной эксплуатационной проверкой.
