@@ -10,6 +10,7 @@ from .loader import (
     load_all_agents,
     load_manifest,
     load_meta_instruction,
+    load_personality_core,
     load_providers,
     resolve_prism_manifest,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "load_all_agents",
     "load_manifest",
     "load_meta_instruction",
+    "load_personality_core",
     "load_providers",
     "resolve_prism_manifest",
 ]
