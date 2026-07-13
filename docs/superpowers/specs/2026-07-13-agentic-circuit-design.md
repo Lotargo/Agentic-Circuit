@@ -204,13 +204,45 @@ tools: { web_search: true, rag: true }   # видит ВСЕ коллекции
 Web-поиск + реранкинг включены только у агента синтеза (`tools.web_search: true`).
 Контуры — только RAG, без внешних инструментов.
 
-## 9. Запуск / Dev
+## 9. Запуск / Dev (контейнеризация)
+
+Каждый компонент — **отдельный Docker-контейнер**, связаны через **общую Docker-сеть** и
+общаются по **HTTP или gRPC**. Это нужно, чтобы позже удобно деплоить по отдельности.
 
 - `uv` для Python-движка (`pyproject.toml` + `uv.lock`).
 - `package.json` для TS-слоя.
-- `docker-compose.yml`: Qdrant, MongoDB, OpenWebUI (-> TS-шлюз), TEI/vLLM sidecar
-  (E5 small + ColBERT small v1), Python-движок, TS-слой.
+- `docker-compose.yml` поднимает независимые сервисы в одной сети:
+  - `qdrant` — векторный стор (в проде заменяется на Qdrant Cloud)
+  - `mongodb` — сырые тексты + настройки OpenWebUI
+  - `openwebui` — фронтенд (отдельный контейнер), стучится в TS-шлюз
+  - `tei-embedding` — инференс E5 small (отдельный контейнер)
+  - `colbert-rerank` — инференс ColBERT small v1 (отдельный контейнер)
+  - `py-engine` — Python-движок LangGraph (отдельный контейнер, langserve)
+  - `ts-gateway` — TS-шлюз (отдельный контейнер)
+- Общая сеть (`docker network`), порты см. раздел 10.
 - `.env.example` (см. раздел 10).
+
+### Границы общения (HTTP/gRPC)
+
+- OpenWebUI → TS-шлюз: **HTTP** (`/v1/chat/completions`, OpenAI-compatible).
+- TS-шлюз → Python-движок: **HTTP** (langserve invoke/stream).
+- Python-движок → Qdrant: **gRPC/HTTP** (qdrant-client).
+- Python-движок → MongoDB: **HTTP** (pymongo).
+- Python-движок → TEI/ColBERT: **HTTP** (REST инференс эмбеддингов/реранка).
+
+## 13. Развёртывание (target)
+
+Контейнерная изоляция позволяет переносить компоненты по отдельности:
+
+- **Vercel** — TS-шлюз (бессерверный/edge), точка входа OpenWebUI-compatible.
+- **Render** (или аналог) — Python-движок LangGraph (langserve).
+- **Облачные зависимости**: Qdrant заменяется на **Qdrant Cloud**; инференс-сервисы
+  (TEI embedding / ColBERT rerank) переносятся на облачный инференс. MongoDB — на
+  облачный MongoDB (Atlas) или Render-аддон.
+- OpenWebUI при деплое конфигурируется на URL TS-шлюза (Vercel).
+
+> Контракты между сервисами (URL/порты) берутся только из env, чтобы один и тот же образ
+> работал и локально, и в облаке.
 
 ## 10. Переменные окружения (`.env.example`)
 
