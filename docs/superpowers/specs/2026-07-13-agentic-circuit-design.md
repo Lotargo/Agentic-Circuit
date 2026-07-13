@@ -151,22 +151,24 @@ Web-поиск + реранкинг включены только у агент�
 
 ## 10. Переменные окружения (`.env.example`)
 
+Порты намеренно нестандартные, чтобы не конфликтовать с уже поднятой инфраструктурой.
+
 ```
 # Провайдеры (OpenAI-compatible)
 OPENCODE_ZEN_API_KEY=sk-...
 # доп. провайдеры: их ключи по мере добавления
 
-# Векторный стор
-QDRANT_URL=http://localhost:6333
+# Векторный стор (Qdrant, стд. 6333/6334 -> 6633/6634)
+QDRANT_URL=http://localhost:6633
 QDRANT_API_KEY=
 
-# NoSQL
-MONGODB_URL=mongodb://localhost:27017
+# NoSQL (MongoDB, стд. 27017 -> 27617)
+MONGODB_URL=mongodb://localhost:27617
 MONGODB_DB=chat_openwebui
 
-# Эмбеддинг/реранк sidecar (TEI/vLLM)
-EMBEDDING_SIDECAR_URL=http://localhost:8080
-RERANK_SIDECAR_URL=http://localhost:8081
+# Эмбеддинг/реранк sidecar (TEI/vLLM, стд. 8080/8081 -> 8899/8898)
+EMBEDDING_SIDECAR_URL=http://localhost:8899
+RERANK_SIDECAR_URL=http://localhost:8898
 EMBEDDING_MODEL=intfloat/multilingual-e5-small
 RERANK_MODEL=answerdotai/colbert-small-v1
 
@@ -174,10 +176,23 @@ RERANK_MODEL=answerdotai/colbert-small-v1
 LANGSEARCH_API_KEY=
 
 # Сервисы
-PY_ENGINE_URL=http://localhost:8123   # langserve
-TS_GATEWAY_PORT=8000
-OPENWEBUI_URL=http://localhost:3000
+PY_ENGINE_URL=http://localhost:8823   # langserve (стд. 8123 -> 8823)
+TS_GATEWAY_PORT=9191                  # OpenAI-compatible gateway (стд. 8000 -> 9191)
+OPENWEBUI_URL=http://localhost:3200   # OpenWebUI (стд. 3000 -> 3200)
 ```
+
+### Карта портов (внешний -> контейнер)
+
+| Сервис            | Хост    | Контейнер |
+|-------------------|---------|-----------|
+| Qdrant REST       | 6633    | 6333      |
+| Qdrant gRPC       | 6634    | 6334      |
+| MongoDB           | 27617   | 27017     |
+| TEI embedding     | 8899    | 80        |
+| TEI/ColBERT rerank| 8898    | 80        |
+| Python engine     | 8823    | 8123      |
+| TS gateway        | 9191    | 9191      |
+| OpenWebUI         | 3200    | 8080      |
 
 ## 11. Тестирование
 
