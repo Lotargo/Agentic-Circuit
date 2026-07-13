@@ -105,13 +105,17 @@ jobs:
           python scripts/ci_mock_provider.py >/tmp/mock.log 2>&1 &
           (cd src/py-engine && uv run --frozen uvicorn agentic_circuit.main:app --host 127.0.0.1 --port 8823) >/tmp/engine.log 2>&1 &
           (cd src/ts-gateway && node dist/index.js) >/tmp/gateway.log 2>&1 &
-          for i in {1..30}; do
-            curl -fsS http://127.0.0.1:9191/healthz && break
+          ready=0
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:9191/v1/models | grep -q 'agentic-circuit'; then
+              ready=1
+              break
+            fi
             sleep 1
           done
+          test "$ready" = "1"
       - name: Verify OpenAI-compatible flow and history payload
         run: |
-          curl -fsS http://127.0.0.1:9191/v1/models | grep -q 'agentic-circuit'
           response=$(curl -fsS http://127.0.0.1:9191/v1/chat/completions \
             -H 'content-type: application/json' \
             -d '{"model":"agentic-circuit","prism":"joy","messages":[{"role":"user","content":"Меня зовут Олег"},{"role":"assistant","content":"Запомнила"},{"role":"user","content":"Как меня зовут?"}]}')
