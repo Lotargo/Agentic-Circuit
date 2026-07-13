@@ -1,0 +1,37 @@
+name: Update Node lock
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/ts-gateway/package.json
+      - .github/workflows/update-node-lock.yml
+
+permissions:
+  contents: write
+
+jobs:
+  lock:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/ts-gateway
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install --package-lock-only --ignore-scripts
+      - name: Commit lockfile
+        working-directory: .
+        run: |
+          if git diff --quiet -- src/ts-gateway/package-lock.json; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/ts-gateway/package-lock.json
+          git commit -m "build: update Node lockfile"
+          git push
