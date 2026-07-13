@@ -1,9 +1,11 @@
 # Optional NVIDIA override:
 # docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#
+# Override TEI_IMAGE/RERANK_IMAGE for the GPU architecture when needed.
 
 services:
   tei-embedding:
-    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.5}
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cuda-1.9}
     deploy:
       resources:
         reservations:
@@ -12,8 +14,8 @@ services:
               count: 1
               capabilities: [gpu]
 
-  colbert-rerank:
-    image: ${RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.5}
+  tei-rerank:
+    image: ${RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cuda-1.9}
     deploy:
       resources:
         reservations:
