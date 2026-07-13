@@ -28,8 +28,10 @@
 - [ ] `config/agents/pragmatic-2.yaml` (phase-2 critic)
 - [ ] `config/agents/effective-1.yaml` (phase-1)
 - [ ] `config/agents/effective-2.yaml` (phase-2 critic)
-- [ ] `config/agents/synthesis.yaml`
-- [ ] `config/skills/*.md` — текстовые инструкции для агентов
+- [ ] `config/agents/synthesis.yaml` (без manifests, с `meta_instruction`)
+- [ ] `config/manifests/<agent>/<prism>.md` — индивидуальные призмы для каждого агента (joy, flirt, resentment, arousal, anger, apathy, neutral, sadness, ...)
+- [ ] Базовая инструкция-личность «Лиза» в `base_prompt` каждого агента
+- [ ] `meta_instruction` для агента синтеза (синтез + отклонение решений, восприятие чужих ответов как своих мыслей)
 - [ ] Загрузчик конфига с валидацией (pydantic/zod) и подстановкой env
 
 ## 3. Python-движок: клиент провайдеров
@@ -46,7 +48,7 @@
 - [ ] Параллельный запуск контуров через `Send()`
 - [ ] Узел `synthesis` (fast и slow пути)
 - [ ] Передача контекста: phase-2 видит только свой phase-1; synthesis видит всё + phase-1
-- [ ] Сборка и компоновка системного промпта (base + skills)
+- [ ] Сборка и компоновка системного промпта (base + manifests; для синтеза — base + meta_instruction)
 
 ## 5. RAG и память
 
@@ -91,7 +93,7 @@
 
 ## 10. Тестирование
 
-- [ ] Юнит-тесты: компоновка промптов (base + skills)
+- [ ] Юнит-тесты: компоновка промптов (base + manifests; meta_instruction для синтеза)
 - [ ] Юнит-тесты: парсинг `providers.yaml` и `agents/*.yaml`
 - [ ] Интегр-тест графа LangGraph на моках провайдера (fast/slow, изоляция RAG)
 - [ ] Smoke-тест: запрос из OpenWebUI через TS-шлюз -> Python-движок
