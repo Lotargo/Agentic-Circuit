@@ -1,0 +1,23 @@
+# Optional NVIDIA override:
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+
+services:
+  tei-embedding:
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.5}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  colbert-rerank:
+    image: ${RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.5}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
