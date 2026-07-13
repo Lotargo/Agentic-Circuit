@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import type { Request, Response } from "express";
 
 const ENGINE_URL = (process.env.PY_ENGINE_URL || "http://localhost:8823").replace(
@@ -42,7 +43,8 @@ export async function chatCompletions(req: Request, res: Response) {
       res.flushHeaders();
 
       for await (const chunk of upstream.body) {
-        if (!res.write(chunk)) {
+        const nodeChunk = Buffer.from(chunk);
+        if (!res.write(nodeChunk)) {
           await new Promise<void>((resolve) => res.once("drain", resolve));
         }
       }
@@ -52,9 +54,7 @@ export async function chatCompletions(req: Request, res: Response) {
 
     res.status(upstream.status).json(await upstream.json());
   } catch (error) {
-    if (controller.signal.aborted) {
-      return;
-    }
+    if (controller.signal.aborted) return;
     const message = error instanceof Error ? error.message : String(error);
     res.status(502).json({ error: `engine unreachable: ${message}` });
   }
