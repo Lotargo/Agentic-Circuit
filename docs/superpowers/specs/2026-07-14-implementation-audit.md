@@ -1,52 +1,47 @@
 # Аудит реализации chat-openwebui
 
-Дата: 2026-07-14
+Дата: 2026-07-14  
+Статус: исправленный и автоматически проверенный MVP-каркас.
 
-## Исправленные запускающие дефекты
+## Исправлено
 
-- Python Dockerfile больше не пытается установить пакет до копирования исходников.
-- Удалена неразрешимая зависимость: пакет `langsearch` требовал `openai==0.27.0`, а движок использует `openai>=1.40.0`.
-- OpenAI-compatible streaming использует корректные SSE-кадры без двойного `data:`.
-- Добавлен `GET /v1/models` для обнаружения логической модели интерфейсом OpenWebUI.
-- TS-шлюз стал прозрачным HTTP/SSE proxy и больше не имитирует использование AI SDK пустым вызовом.
-- Путь к `config/providers.yaml` корректно разрешается локально и в контейнере; запись выполняется атомарно.
-- Полный URL `/chat/completions` нормализуется перед передачей в `AsyncOpenAI`.
-- Отсутствующий API-ключ даёт понятную ошибку, а не используется как буквальное значение ключа.
-- Ошибки параллельных веток LangGraph агрегируются reducer-ом.
-- Router использует собственный YAML `base_prompt`.
-- Текущая phase-1 больше не попадает в phase-2 дважды через немедленный RAG upsert.
-- Ошибки RAG retrieve/upsert не обрушивают весь LLM-граф.
-- E5 получает обязательные `query:` и `passage:` префиксы.
-- Тексты и BM25-индекс восстанавливаются из Qdrant payload после рестарта Python-процесса.
-- TEI rerank client приведён к реальному контракту `query + texts + return_text`.
-- Неподдерживаемый TEI-моделью `answerdotai/colbert-small-v1` заменён на поддерживаемый мультиязычный cross-encoder `Alibaba-NLP/gte-multilingual-reranker-base`.
-- Базовый Compose стал CPU-first; GPU вынесен в отдельный override.
-- TEI images обновлены до серии 1.9, добавлены volumes кэша моделей и healthchecks собственных сервисов.
-- Добавлен CI: pytest, TypeScript typecheck/build, проверка Compose и Docker-сборки.
+- Выбрана одна транспортная архитектура: собственный OpenAI-compatible FastAPI engine за прозрачным Express gateway.
+- LangServe, LlamaIndex, Python-пакет `langsearch`, Vercel AI SDK и MongoDB удалены из обязательного runtime как неиспользуемые или неверно заявленные компоненты.
+- Python и Node зависимости зафиксированы lock-файлами; Docker builds используют frozen Python lock.
+- Полная история `user/assistant` проходит через router, circuit phase-1/2 и synthesis.
+- Для запроса выбирается ровно одна активная эмоциональная призма.
+- Provider CRUD защищён `PROVIDERS_ADMIN_TOKEN`, пишет YAML атомарно и вызывает hot reload Python engine.
+- Конфигурация отслеживается fingerprint-ом и применяется без рестарта контейнера.
+- Финальный synthesis использует настоящий upstream provider stream. Токены проходят через LangGraph custom events и немедленно превращаются в OpenAI SSE chunks.
+- TS gateway проксирует SSE с backpressure и явно преобразует Web Stream chunks в Node `Buffer`.
+- Router использует YAML prompt; параллельные состояния и ошибки объединяются reducer-ами.
+- RAG не блокирует старт API и деградирует безопасно при недоступных sidecars.
+- E5 использует `query:` / `passage:`; Qdrant payload восстанавливает тексты и BM25 после рестарта.
+- TEI rerank приведён к реальному cross-encoder контракту; неподдерживаемый псевдо-ColBERT заменён на `Alibaba-NLP/gte-multilingual-reranker-base`.
+- Текущий phase-1 не загрязняет RAG-контекст phase-2 того же хода.
+- CPU/GPU Compose разделены; добавлены volumes моделей и readiness для собственных сервисов.
 
-## Подтверждённые расхождения со спецификацией
+## Проверено в GitHub Actions
 
-Эти пункты нельзя считать выполненными:
+Финальный clean run проверяет:
 
-1. `LangServe` заявлен как транспорт Python-движка, но runtime использует собственный FastAPI endpoint `/v1/chat/completions`.
-2. `LlamaIndex` и Python-пакет `langsearch` заявлены в стеке, но runtime их не использует. LangSearch API вызывается напрямую через `httpx`.
-3. `@ai-sdk/openai-compatible` является provider adapter для исходящих LLM-вызовов, а не formatter OpenAI-compatible server responses. TS-шлюз фактически является proxy.
-4. Provider CRUD изменяет YAML, но Python-движок кэширует конфигурацию; нужен рестарт `py-engine`.
-5. `MongoStore` написан, но не подключён к основному графу.
-6. Все манифесты настроений одного агента одновременно добавляются в prompt; выбора активной призмы нет.
-7. В граф передаётся только последнее пользовательское сообщение; история диалога теряется.
-8. Настоящий ColBERT late interaction не реализован. Он требует token-level multi-vectors и MaxSim, а не TEI cross-encoder `/rerank`.
-9. Ответ сначала полностью вычисляется графом и только потом нарезается на SSE chunks. Это совместимый, но не настоящий token streaming.
-10. `/v1/providers` не имеет отдельной авторизации; безопасен только в доверенной локальной сети.
-11. `uv.lock` отсутствует, Python-зависимости не зафиксированы lock-файлом.
-12. Полный smoke flow OpenWebUI -> gateway -> engine -> provider + Qdrant/TEI ещё не выполнялся.
+- актуальность `uv.lock` и frozen install;
+- весь pytest suite;
+- TypeScript typecheck и production build;
+- `docker compose config`;
+- чистые Docker builds Python engine и TS gateway;
+- HTTP flow mock OpenAI provider -> Python engine -> TS gateway -> completion с историей сообщений и выбранной prism.
 
-## Критерий готовности рабочего MVP
+Все четыре job завершились успешно.
 
-- CI зелёный на чистом checkout.
-- CPU Compose полностью поднимается без NVIDIA runtime и проходит healthchecks.
-- OpenWebUI видит `agentic-circuit` через `/v1/models` и получает валидный ответ.
-- Проверены fast и slow ветки с реальным provider API.
-- Provider config либо перечитывается горячо, либо API явно возвращает `restart_required: true`.
-- Выбрана одна транспортная архитектура: LangServe invoke/stream или внутренний OpenAI-compatible FastAPI API.
-- Для ColBERT принято отдельное решение: реализовать Qdrant multi-vector MaxSim либо официально оставить cross-encoder rerank.
+## Что остаётся эксплуатационной проверкой
+
+Автоматический smoke-test намеренно не скачивает тяжёлые TEI-модели и OpenWebUI image. Поэтому перед реальной эксплуатацией всё ещё нужен один локальный прогон полного Compose с настоящим provider key:
+
+1. дождаться readiness Qdrant и обоих TEI sidecars;
+2. убедиться, что OpenWebUI обнаруживает `agentic-circuit`;
+3. вручную проверить fast и slow запросы;
+4. проверить сохранение и извлечение RAG после перезапуска;
+5. проверить выбранный GPU image tag на конкретной видеокарте.
+
+Настоящий ColBERT late interaction не является частью текущего MVP. Фактическое и документированное решение — TEI cross-encoder rerank. Если ColBERT понадобится позднее, это отдельная функция с token-level multi-vectors и MaxSim, а не замена имени модели в существующем sidecar.
