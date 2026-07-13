@@ -24,31 +24,33 @@ def assemble_system_prompt(agent: AgentConfig) -> str:
             parts.append("")
             parts.append("## Призмы настроения (твои ипостаси)")
             parts.append("Ты ведёшь себя согласно этим призмам, раскрывая свою личность:")
-            for m in manifests:
+            for manifest in manifests:
                 parts.append("")
-                parts.append(m.strip())
+                parts.append(manifest.strip())
     return "\n".join(parts)
 
 
 def _format_context(contexts: list[str]) -> str:
     if not contexts:
         return ""
-    lines = ["", "## Релевантные воспоминания (твои прошлые мысли)",
-             "Используй их как контекст, не цитируя явно:"]
-    for i, c in enumerate(contexts, 1):
-        lines.append(f"{i}. {c}")
+    lines = [
+        "",
+        "## Релевантные воспоминания (твои прошлые мысли)",
+        "Используй их как контекст, не цитируя явно:",
+    ]
+    for index, context in enumerate(contexts, 1):
+        lines.append(f"{index}. {context}")
     return "\n".join(lines)
 
 
-def router_messages(user_input: str) -> list[dict]:
+def router_messages(agent: AgentConfig, user_input: str) -> list[dict]:
+    """Build the router prompt from its YAML config plus a strict output contract."""
     system = (
-        "Ты — маршрутизатор внутри сознания Лизы. Реши, нужен ли глубокий "
-        "многоконтурный разбор (slow) или достаточно прямого ответа (fast).\n\n"
-        "Правила:\n"
-        "- Отвечай ТОЛЬКО одним словом: 'fast' или 'slow'.\n"
-        "- slow — сложные, творческие, неоднозначные, эмоциональные или "
-        "требующие критики запросы.\n"
-        "- fast — простые, фактические, рутинные запросы.\n"
+        assemble_system_prompt(agent)
+        + "\n\n## Формат решения\n"
+        + "- Ответь только одним словом: fast или slow.\n"
+        + "- slow: сложный, творческий, неоднозначный, эмоциональный запрос или запрос, требующий критики.\n"
+        + "- fast: простой, фактический или рутинный запрос."
     )
     return [
         {"role": "system", "content": system},
@@ -103,8 +105,8 @@ def synthesis_messages(
             blocks.append(f"Отточенная мысль: {circuit_phase2[circuit]}")
     if web_results:
         blocks.append("\n## Данные из внешнего поиска (твои уточнения)")
-        for i, w in enumerate(web_results, 1):
-            blocks.append(f"{i}. {w}")
+        for index, result in enumerate(web_results, 1):
+            blocks.append(f"{index}. {result}")
     blocks.append(_format_context(contexts))
     blocks.append(
         "\nСформируй единый цельный ответ от лица Лизы. Отклоняй ошибочные или "
