@@ -19,12 +19,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install uv
-        run: python -m pip install --upgrade uv
-      - name: Install engine with test dependencies
-        run: uv pip install --system -e "src/py-engine[test]"
+      - run: python -m pip install --upgrade uv
+      - name: Verify lockfile
+        working-directory: src/py-engine
+        run: uv lock --check
+      - name: Install locked engine and tests
+        working-directory: src/py-engine
+        run: uv sync --frozen --extra test
       - name: Run pytest
-        run: pytest -q src/py-engine/tests
+        working-directory: src/py-engine
+        run: uv run --frozen pytest -q
 
   typescript:
     name: TypeScript build
@@ -58,3 +62,64 @@ jobs:
         run: docker build -f src/py-engine/Dockerfile -t chat-openwebui-py-engine:ci .
       - name: Build TypeScript gateway image
         run: docker build -f src/ts-gateway/Dockerfile -t chat-openwebui-ts-gateway:ci .
+
+  smoke:
+    name: Gateway to engine smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: python -m pip install --upgrade uv
+      - name: Install services
+        run: |
+          cd src/py-engine
+          uv sync --frozen
+          cd ../ts-gateway
+          npm ci
+          npm run build
+      - name: Prepare isolated provider configuration
+        run: |
+          cp -R config /tmp/agentic-config
+          cat > /tmp/agentic-config/providers.yaml <<'YAML'
+          providers:
+            opencode-zen:
+              type: openai-compatible
+              base_url: http://127.0.0.1:18080/v1
+              api_key_env: OPENCODE_ZEN_API_KEY
+              models: [hy3-free]
+          YAML
+      - name: Start mock provider, engine and gateway
+        env:
+          CONFIG_DIR: /tmp/agentic-config
+          OPENCODE_ZEN_API_KEY: smoke-key
+          QDRANT_URL: http://127.0.0.1:16633
+          PY_ENGINE_URL: http://127.0.0.1:8823
+          TS_GATEWAY_PORT: "9191"
+        run: |
+          python scripts/ci_mock_provider.py >/tmp/mock.log 2>&1 &
+          (cd src/py-engine && uv run --frozen uvicorn agentic_circuit.main:app --host 127.0.0.1 --port 8823) >/tmp/engine.log 2>&1 &
+          (cd src/ts-gateway && node dist/index.js) >/tmp/gateway.log 2>&1 &
+          for i in {1..30}; do
+            curl -fsS http://127.0.0.1:9191/healthz && break
+            sleep 1
+          done
+      - name: Verify OpenAI-compatible flow and history payload
+        run: |
+          curl -fsS http://127.0.0.1:9191/v1/models | grep -q 'agentic-circuit'
+          response=$(curl -fsS http://127.0.0.1:9191/v1/chat/completions \
+            -H 'content-type: application/json' \
+            -d '{"model":"agentic-circuit","prism":"joy","messages":[{"role":"user","content":"Меня зовут Олег"},{"role":"assistant","content":"Запомнила"},{"role":"user","content":"Как меня зовут?"}]}')
+          echo "$response"
+          echo "$response" | grep -q 'SMOKE_OK'
+      - name: Print logs on failure
+        if: failure()
+        run: |
+          cat /tmp/mock.log || true
+          cat /tmp/engine.log || true
+          cat /tmp/gateway.log || true
