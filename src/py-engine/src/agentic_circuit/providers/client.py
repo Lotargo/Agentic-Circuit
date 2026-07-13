@@ -28,9 +28,6 @@ class LLMResult:
         self.error = error
         self.latency_ms = latency_ms
 
-    def __repr__(self) -> str:  # pragma: no cover - debug helper
-        return f"<LLMResult model={self.model} tokens={self.completion_tokens} err={self.error}>"
-
 
 _THINKING_TO_EXTRA = {
     "off": None,
@@ -41,16 +38,9 @@ _THINKING_TO_EXTRA = {
 
 
 def _openai_sdk_base_url(configured_url: str) -> str:
-    """Convert a documented chat-completions endpoint into an SDK base URL.
-
-    ``AsyncOpenAI`` appends ``/chat/completions`` itself. Passing a full endpoint
-    would otherwise produce ``.../chat/completions/chat/completions``.
-    """
     url = configured_url.rstrip("/")
     suffix = "/chat/completions"
-    if url.endswith(suffix):
-        url = url[: -len(suffix)]
-    return url
+    return url[: -len(suffix)] if url.endswith(suffix) else url
 
 
 class ProviderClient(Protocol):
@@ -63,8 +53,6 @@ class ProviderClient(Protocol):
 
 
 class OpenAICompatibleClient:
-    """Calls an OpenAI-compatible chat-completions endpoint."""
-
     def __init__(self, provider: Provider):
         api_key = os.environ.get(provider.api_key_env)
         if not api_key:
@@ -117,10 +105,11 @@ class OpenAICompatibleClient:
                 latency_ms=int((time.monotonic() - start) * 1000),
             )
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
 
 class ClientRegistry:
-    """Lazily builds and caches one client per provider."""
-
     def __init__(self, providers: dict[str, Provider]):
         self._providers = providers
         self._cache: dict[str, OpenAICompatibleClient] = {}
@@ -131,3 +120,9 @@ class ClientRegistry:
                 raise KeyError(f"Unknown provider: {name}")
             self._cache[name] = OpenAICompatibleClient(self._providers[name])
         return self._cache[name]
+
+    async def aclose(self) -> None:
+        clients = list(self._cache.values())
+        self._cache.clear()
+        for client in clients:
+            await client.aclose()
