@@ -1,47 +1,76 @@
 import type { Request, Response } from "express";
-import { engineProvider } from "../client/pyEngine.js";
 
-const ENGINE_URL = process.env.PY_ENGINE_URL || "http://localhost:8823";
+const ENGINE_URL = (process.env.PY_ENGINE_URL || "http://localhost:8823").replace(
+  /\/$/,
+  "",
+);
 
-/**
- * POST /v1/chat/completions
- * OpenAI-compatible endpoint. Forwards the request to the Python LangGraph engine
- * and streams the response straight back to the OpenWebUI client.
- */
+async function forwardError(upstream: globalThis.Response, res: Response) {
+  const contentType = upstream.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    res.status(upstream.status).json(await upstream.json());
+    return;
+  }
+  res.status(upstream.status).json({ error: await upstream.text() });
+}
+
+/** POST /v1/chat/completions — transparent OpenAI-compatible proxy. */
 export async function chatCompletions(req: Request, res: Response) {
-  // Touch the provider so the AI SDK contract is wired (engine does the real work).
-  engineProvider(`${ENGINE_URL}/v1`);
-
   const stream = Boolean(req.body?.stream);
+  const controller = new AbortController();
+  res.on("close", () => controller.abort());
 
   try {
     const upstream = await fetch(`${ENGINE_URL}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(req.body),
+      signal: controller.signal,
     });
 
     if (!upstream.ok) {
-      const text = await upstream.text();
-      res.status(upstream.status).json({ error: text });
+      await forwardError(upstream, res);
       return;
     }
 
     if (stream && upstream.body) {
-      res.setHeader("content-type", "text/event-stream");
+      res.status(upstream.status);
+      res.setHeader("content-type", "text/event-stream; charset=utf-8");
       res.setHeader("cache-control", "no-cache");
       res.setHeader("connection", "keep-alive");
-      // Pipe the engine's SSE frames verbatim (already OpenAI-compatible).
+      res.setHeader("x-accel-buffering", "no");
+      res.flushHeaders();
+
       for await (const chunk of upstream.body) {
-        res.write(chunk);
+        if (!res.write(chunk)) {
+          await new Promise<void>((resolve) => res.once("drain", resolve));
+        }
       }
       res.end();
       return;
     }
 
-    const data = await upstream.json();
-    res.json(data);
-  } catch (err) {
-    res.status(502).json({ error: `engine unreachable: ${(err as Error).message}` });
+    res.status(upstream.status).json(await upstream.json());
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(502).json({ error: `engine unreachable: ${message}` });
+  }
+}
+
+/** GET /v1/models — expose engine models to OpenWebUI. */
+export async function listModels(_req: Request, res: Response) {
+  try {
+    const upstream = await fetch(`${ENGINE_URL}/v1/models`);
+    if (!upstream.ok) {
+      await forwardError(upstream, res);
+      return;
+    }
+    res.status(upstream.status).json(await upstream.json());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(502).json({ error: `engine unreachable: ${message}` });
   }
 }
