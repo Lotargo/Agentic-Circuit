@@ -1,5 +1,4 @@
 # Python LangGraph engine
-# Build context is the repo root (see docker-compose.yml) so ../config is available.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -8,14 +7,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install uv (fast Python package manager)
 RUN pip install --no-cache-dir uv
 
+# The project must exist before hatchling can build/install it.
 COPY src/py-engine/pyproject.toml ./
-RUN uv pip install --system .
-
-# App source + shared config (providers, agents, manifests)
 COPY src/py-engine/src/ ./src/
+RUN uv pip install --system --no-cache .
+
+# Shared runtime configuration.
 COPY config/ ./config/
 
 EXPOSE 8823
