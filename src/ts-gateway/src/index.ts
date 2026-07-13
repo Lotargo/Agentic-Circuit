@@ -1,5 +1,5 @@
 import express from "express";
-import { chatCompletions } from "./routes/chat.js";
+import { chatCompletions, listModels } from "./routes/chat.js";
 import {
   deleteProvider,
   listProviders,
@@ -7,14 +7,14 @@ import {
 } from "./routes/providers.js";
 
 const app = express();
+app.disable("x-powered-by");
 app.use(express.json({ limit: "4mb" }));
 
 const PORT = Number(process.env.TS_GATEWAY_PORT || 9191);
 
-// OpenAI-compatible chat endpoint consumed by OpenWebUI.
+app.get("/v1/models", listModels);
 app.post("/v1/chat/completions", chatCompletions);
 
-// Provider management (driven from OpenWebUI UI / admin).
 app.get("/v1/providers", listProviders);
 app.post("/v1/providers", upsertProvider);
 app.delete("/v1/providers", deleteProvider);
