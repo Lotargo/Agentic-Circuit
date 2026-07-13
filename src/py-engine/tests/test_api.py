@@ -5,7 +5,10 @@ from fastapi.testclient import TestClient
 from agentic_circuit import main
 
 
-async def _fake_run(_user_input: str) -> str:
+async def _fake_run(conversation: list[dict], prism: str) -> str:
+    assert conversation[0]["content"] == "Меня зовут Олег"
+    assert conversation[-1]["content"] == "Как меня зовут?"
+    assert prism == "joy"
     return "готовый ответ"
 
 
@@ -16,14 +19,19 @@ def test_models_endpoint_exposes_logical_model():
     assert response.json()["data"][0]["id"] == "agentic-circuit"
 
 
-def test_non_stream_completion(monkeypatch):
+def test_non_stream_completion_preserves_history_and_prism(monkeypatch):
     monkeypatch.setattr(main, "_run", _fake_run)
     client = TestClient(main.app)
     response = client.post(
         "/v1/chat/completions",
         json={
             "model": "agentic-circuit",
-            "messages": [{"role": "user", "content": "Привет"}],
+            "prism": "joy",
+            "messages": [
+                {"role": "user", "content": "Меня зовут Олег"},
+                {"role": "assistant", "content": "Запомнила"},
+                {"role": "user", "content": "Как меня зовут?"},
+            ],
         },
     )
     assert response.status_code == 200
@@ -39,7 +47,12 @@ def test_stream_uses_single_sse_prefix_and_done_marker(monkeypatch):
         "/v1/chat/completions",
         json={
             "stream": True,
-            "messages": [{"role": "user", "content": "Привет"}],
+            "prism": "joy",
+            "messages": [
+                {"role": "user", "content": "Меня зовут Олег"},
+                {"role": "assistant", "content": "Запомнила"},
+                {"role": "user", "content": "Как меня зовут?"},
+            ],
         },
     )
     assert response.status_code == 200
@@ -49,10 +62,22 @@ def test_stream_uses_single_sse_prefix_and_done_marker(monkeypatch):
     assert "chat.completion.chunk" in response.text
 
 
-def test_empty_user_message_is_rejected():
+def test_invalid_final_message_is_rejected():
     client = TestClient(main.app)
     response = client.post(
         "/v1/chat/completions",
         json={"messages": [{"role": "assistant", "content": "hello"}]},
+    )
+    assert response.status_code == 400
+
+
+def test_invalid_prism_is_rejected():
+    client = TestClient(main.app)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "prism": "unknown",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
     )
     assert response.status_code == 400
