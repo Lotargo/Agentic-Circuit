@@ -1,8 +1,4 @@
-"""Integration test: full LangGraph circuit on mocked providers.
-
-Verifies fast/slow branches, per-circuit isolation (a circuit's phase-2 never
-sees another circuit's phase-1), and aggregation into synthesis.
-"""
+"""Integration tests for the full LangGraph circuit on mocked providers."""
 
 import pytest
 
@@ -11,8 +7,12 @@ from agentic_circuit.graph import EngineContext, build_graph
 from agentic_circuit.providers import LLMResult
 from agentic_circuit.rag import NullMemory
 
-
 ROUTE = {"value": "fast"}
+CONVERSATION = [
+    {"role": "user", "content": "Меня зовут Олег"},
+    {"role": "assistant", "content": "Запомнила"},
+    {"role": "user", "content": "Как меня зовут?"},
+]
 
 
 class RecordingClient:
@@ -27,15 +27,12 @@ class RecordingClient:
         if "собираешь" in system:
             return LLMResult(content="SYNTH", model=model_cfg.model)
         role = (
-            "creative"
-            if "креативная" in system
-            else "pragmatic"
-            if "прагматичная" in system
-            else "effective"
-            if "эффективная" in system
-            else "unknown"
+            "creative" if "креативная" in system else
+            "pragmatic" if "прагматичная" in system else
+            "effective" if "эффективная" in system else "unknown"
         )
-        if "критик" in system or "критика самой себя" in system:
+        all_content = "\n".join(message["content"] for message in messages)
+        if "сырой ответ текущего хода" in all_content.lower():
             return LLMResult(content=f"P2::{role}", model=model_cfg.model)
         return LLMResult(content=f"P1::{role}", model=model_cfg.model)
 
@@ -44,31 +41,30 @@ class FakeRegistry:
     def __init__(self, client):
         self._client = client
 
-    def get(self, name):
+    def get(self, _name):
         return self._client
+
+    async def aclose(self): ...
 
 
 class FakeComposite:
     async def ensure_collection(self): ...
-    async def retrieve(self, query, top_k=5, use_rerank=True):
-        return []
-    async def upsert(self, text, doc_id=None):
-        return ""
+    async def retrieve(self, query, top_k=5, use_rerank=True): return []
+    async def upsert(self, text, doc_id=None): return ""
 
 
 @pytest.fixture
 def ctx():
     cfg = CircuitConfig.from_disk()
     client = RecordingClient()
-    circuits = sorted({a.circuit for a in cfg.agents.values() if a.circuit})
-    memories = {c: NullMemory() for c in circuits}
+    circuits = sorted({agent.circuit for agent in cfg.agents.values() if agent.circuit})
     context = EngineContext(
         config=cfg,
         clients=FakeRegistry(client),
         embeddings=None,
         rerank=None,
         web=None,
-        memories=memories,
+        memories={circuit: NullMemory() for circuit in circuits},
         synthesis_memory=FakeComposite(),
     )
     context._client = client
@@ -81,10 +77,16 @@ def reset():
     yield
 
 
+def initial_state():
+    return {
+        "user_input": CONVERSATION[-1]["content"],
+        "conversation": CONVERSATION,
+        "prism": "joy",
+    }
+
+
 async def test_fast_path_goes_straight_to_synthesis(ctx):
-    ROUTE["value"] = "fast"
-    graph = build_graph(ctx)
-    result = await graph.ainvoke({"user_input": "Привет"})
+    result = await build_graph(ctx).ainvoke(initial_state())
     assert result["route"] == "fast"
     assert result["synthesis_output"] == "SYNTH"
     assert result.get("circuit_phase1", {}) == {}
@@ -92,28 +94,30 @@ async def test_fast_path_goes_straight_to_synthesis(ctx):
 
 async def test_slow_path_runs_all_circuits_in_parallel(ctx):
     ROUTE["value"] = "slow"
-    graph = build_graph(ctx)
-    result = await graph.ainvoke({"user_input": "Спланируй отпуск"})
-    assert result["route"] == "slow"
-    assert set(result["circuit_phase1"].keys()) == {"creative", "pragmatic", "effective"}
-    assert set(result["circuit_phase2"].keys()) == {"creative", "pragmatic", "effective"}
-    assert "P1::creative" in result["circuit_phase1"]["creative"]
+    result = await build_graph(ctx).ainvoke(initial_state())
+    assert set(result["circuit_phase1"]) == {"creative", "pragmatic", "effective"}
+    assert set(result["circuit_phase2"]) == {"creative", "pragmatic", "effective"}
     assert result["synthesis_output"] == "SYNTH"
+
+
+async def test_history_and_prism_reach_circuit_prompts(ctx):
+    ROUTE["value"] = "slow"
+    await build_graph(ctx).ainvoke(initial_state())
+    circuit_calls = [messages for messages, _ in ctx._client.calls if "креативная" in messages[0]["content"]]
+    assert circuit_calls
+    combined = "\n".join(message["content"] for message in circuit_calls[0])
+    assert "Меня зовут Олег" in combined
+    assert "Активная призма настроения: joy" in circuit_calls[0][0]["content"]
 
 
 async def test_circuit_isolation_phase2_sees_only_own_phase1(ctx):
     ROUTE["value"] = "slow"
-    graph = build_graph(ctx)
-    await graph.ainvoke({"user_input": "Идея для подарка"})
-    client = ctx._client
-    # find creative phase-2 call
+    await build_graph(ctx).ainvoke(initial_state())
     phase2_creative = None
-    for messages, _ in client.calls:
-        sys_text = messages[0]["content"]
-        if "креативная" in sys_text and ("критик" in sys_text or "критика самой себя" in sys_text):
-            phase2_creative = messages[1]["content"]
+    for messages, _ in ctx._client.calls:
+        content = "\n".join(message["content"] for message in messages)
+        if "креативная" in messages[0]["content"] and "P1::creative" in content:
+            phase2_creative = content
     assert phase2_creative is not None
-    # creative's phase-2 must contain its own phase-1 but NOT other circuits'
-    assert "P1::creative" in phase2_creative
     assert "P1::pragmatic" not in phase2_creative
     assert "P1::effective" not in phase2_creative
