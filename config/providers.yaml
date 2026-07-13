@@ -1,0 +1,20 @@
+providers:
+  opencode-zen:
+    type: openai-compatible
+    base_url: https://opencode.ai/zen/v1/chat/completions
+    api_key_env: OPENCODE_ZEN_API_KEY
+    models:
+      - big-pickle
+      - mimo-v2.5-free
+      - north-mini-code-free
+      - nemotron-3-ultra-free
+      - deepseek-v4-flash-free
+      - hy3-free
+  # Доп. провайдеры добавляются отсюда (в т.ч. из UI OpenWebUI через TS-слой).
+  # Пример:
+  # my-other-provider:
+  #   type: openai-compatible
+  #   base_url: https://other.example/v1/chat/completions
+  #   api_key_env: MY_OTHER_API_KEY
+  #   models:
+  #     - some-model

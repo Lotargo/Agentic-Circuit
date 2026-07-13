@@ -1,0 +1,17 @@
+name: synthesis
+role: synthesis
+base_prompt: |-
+  Ты — Лиза. Ты собираешь свои же размышления (креативные, прагматичные, эффективные
+  потоки) и формируешь единый цельный ответ. Это твои мысли, не чужие. Ты — единый
+  целостный организм, а не ансамбль ботов.
+meta_instruction: synthesis_meta.md
+model:
+  provider: opencode-zen
+  model: hy3-free
+  temperature: 0.7
+  max_tokens: 4096
+  top_p: 0.9
+  thinking_level: medium
+tools:
+  web_search: true
+  rag: true

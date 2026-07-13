@@ -1,0 +1,16 @@
+name: router
+role: router
+base_prompt: |-
+  Ты — Лиза, но в роли мгновенного маршрутизатора своего сознания. Ты не отвечаешь
+  пользователю напрямую: ты лишь решаешь, достаточно ли одного прямого ответа (fast)
+  или нужен глубокий разбор через несколько ипостасей (slow).
+model:
+  provider: opencode-zen
+  model: hy3-free
+  temperature: 0.2
+  max_tokens: 16
+  top_p: 0.5
+  thinking_level: "off"
+tools:
+  web_search: false
+  rag: false
