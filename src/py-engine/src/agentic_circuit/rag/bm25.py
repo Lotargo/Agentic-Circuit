@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 
 
 def _tokenize(text: str) -> list[str]:
@@ -24,9 +25,16 @@ class BM25Index:
         self.avg_len = 0.0
 
     def add(self, doc_id: str, text: str) -> None:
-        """Insert or replace a document without duplicating its statistics."""
         self._documents[doc_id] = _tokenize(text)
         self._rebuild()
+
+    def add_many(self, documents: Iterable[tuple[str, str]]) -> None:
+        changed = False
+        for doc_id, text in documents:
+            self._documents[doc_id] = _tokenize(text)
+            changed = True
+        if changed:
+            self._rebuild()
 
     def clear(self) -> None:
         self._documents.clear()
@@ -55,8 +63,12 @@ class BM25Index:
         if not query_tokens or not self.docs:
             return []
 
-        scores: list[float] = []
-        for tokens, document_length in zip(self.docs, self.doc_len):
+        ranked: list[tuple[str, float]] = []
+        for doc_id, tokens, document_length in zip(
+            self.doc_ids,
+            self.docs,
+            self.doc_len,
+        ):
             term_frequencies = Counter(tokens)
             score = 0.0
             for term in query_tokens:
@@ -70,11 +82,8 @@ class BM25Index:
                 score += self.idf[term] * (
                     frequency * (self.k1 + 1)
                 ) / denominator
-            scores.append(score)
+            if score > 0:
+                ranked.append((doc_id, score))
 
-        ranked = sorted(
-            zip(self.doc_ids, scores),
-            key=lambda item: item[1],
-            reverse=True,
-        )
+        ranked.sort(key=lambda item: item[1], reverse=True)
         return ranked[:top_n]
