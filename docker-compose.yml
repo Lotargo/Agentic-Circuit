@@ -1,18 +1,14 @@
-# Agentic circuit — full local stack (docker-compose).
+# Agentic circuit — CPU-first local stack.
 #
-# Every component is an independent container on a shared network and talks over
-# HTTP. Service-to-service URLs use Docker service names (qdrant, mongodb, ...).
-# Host-to-service ports are mapped per docs/superpowers/specs (section 10).
-#
-# Inference (TEI embedding / ColBERT rerank) runs on GPU when available and
-# transparently falls back to CPU otherwise — no image rebuild required.
+# GPU reservations live in docker-compose.gpu.yml. The default file must start
+# on machines without an NVIDIA runtime instead of failing device selection.
 
 services:
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "6633:6333"   # REST
-      - "6634:6334"   # gRPC
+      - "6633:6333"
+      - "6634:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     networks: [agentic]
@@ -28,41 +24,20 @@ services:
     restart: unless-stopped
 
   tei-embedding:
-    # TEI CPU image by default; switch to the GPU tag when CUDA is present.
-    # GPU tag example: ghcr.io/huggingface/text-embeddings-inference:1.5
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.5}
     ports:
       - "8899:80"
     environment:
       MODEL_ID: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
-      # For GPU, also pass:
-      # DEPLOYMENT_INFERENCE_PRECISION: fp16
-    # GPU (auto-ignored on CPU-only hosts):
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     networks: [agentic]
     restart: unless-stopped
 
   colbert-rerank:
-    # Provide a ColBERT late-interaction rerank serving image.
-    # Replace with your hosted rerank server image; CPU/GPU handled by that image.
     image: ${RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.5}
     ports:
       - "8898:80"
     environment:
       MODEL_ID: ${RERANK_MODEL:-answerdotai/colbert-small-v1}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     networks: [agentic]
     restart: unless-stopped
 
@@ -74,13 +49,14 @@ services:
       - "8823:8823"
     env_file: [.env]
     environment:
-      # Service-to-service URLs (override host-localhost .env values):
+      CONFIG_DIR: /app/config
       QDRANT_URL: http://qdrant:6333
       MONGODB_URL: mongodb://mongodb:27017
       EMBEDDING_SIDECAR_URL: http://tei-embedding:80
       RERANK_SIDECAR_URL: http://colbert-rerank:80
-      PY_ENGINE_URL: http://py-engine:8823
       PY_ENGINE_PORT: "8823"
+    volumes:
+      - ./config:/app/config:ro
     depends_on: [qdrant, mongodb, tei-embedding, colbert-rerank]
     networks: [agentic]
     restart: unless-stopped
@@ -95,6 +71,9 @@ services:
     environment:
       PY_ENGINE_URL: http://py-engine:8823
       TS_GATEWAY_PORT: "9191"
+      PROVIDERS_YAML: /app/config/providers.yaml
+    volumes:
+      - ./config:/app/config
     depends_on: [py-engine]
     networks: [agentic]
     restart: unless-stopped
@@ -104,7 +83,6 @@ services:
     ports:
       - "3200:8080"
     environment:
-      # Point OpenWebUI at our OpenAI-compatible TS gateway.
       OPENAI_API_BASE_URL: http://ts-gateway:9191/v1
       OPENAI_API_KEY: dummy
     depends_on: [ts-gateway]
