@@ -1,13 +1,9 @@
-"""HTTP client for a Text Embeddings Inference cross-encoder reranker.
-
-TEI's ``/rerank`` endpoint accepts ``query`` + ``texts``. It is not a ColBERT
-late-interaction endpoint: the sidecar must serve a supported sequence
-classification reranker such as ``Alibaba-NLP/gte-multilingual-reranker-base``.
-"""
+"""HTTP client for a Text Embeddings Inference cross-encoder reranker."""
 
 from __future__ import annotations
 
 import os
+from collections import defaultdict, deque
 
 import httpx
 
@@ -27,17 +23,15 @@ class RerankClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.url = (url or RERANK_SIDECAR_URL).rstrip("/")
-        # Kept for diagnostics/config parity. A TEI container serves one model,
-        # selected at process startup rather than per request.
         self.model = model or RERANK_MODEL
         self._client = httpx.AsyncClient(timeout=timeout, transport=transport)
 
-    async def rerank(
+    async def rerank_indices(
         self,
         query: str,
         documents: list[str],
         top_n: int | None = None,
-    ) -> list[tuple[str, float]]:
+    ) -> list[tuple[int, float]]:
         if not documents:
             return []
 
@@ -56,23 +50,35 @@ class RerankClient:
         if not isinstance(results, list):
             raise ValueError("rerank sidecar returned an unsupported response")
 
-        ranked: list[tuple[str, float]] = []
+        by_text: dict[str, deque[int]] = defaultdict(deque)
+        for index, document in enumerate(documents):
+            by_text[document].append(index)
+
+        ranked: list[tuple[int, float]] = []
         for item in results:
             if not isinstance(item, dict):
                 raise ValueError("rerank sidecar returned a non-object result")
-
             score = float(item.get("score", 0.0))
-            text = item.get("text") or item.get("document")
-            if not isinstance(text, str):
-                index = item.get("index")
-                if isinstance(index, int) and 0 <= index < len(documents):
-                    text = documents[index]
-                else:
-                    raise ValueError("rerank result has neither text nor a valid index")
-            ranked.append((text, score))
+            index = item.get("index")
+            if not isinstance(index, int):
+                text = item.get("text") or item.get("document")
+                if not isinstance(text, str) or not by_text[text]:
+                    raise ValueError("rerank result has neither index nor known text")
+                index = by_text[text].popleft()
+            if 0 <= index < len(documents):
+                ranked.append((index, score))
 
         ranked.sort(key=lambda pair: pair[1], reverse=True)
         return ranked[:top_n] if top_n is not None else ranked
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+    ) -> list[tuple[str, float]]:
+        ranked = await self.rerank_indices(query, documents, top_n)
+        return [(documents[index], score) for index, score in ranked]
 
     async def aclose(self) -> None:
         await self._client.aclose()

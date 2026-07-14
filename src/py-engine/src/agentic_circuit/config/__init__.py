@@ -6,10 +6,9 @@ from .loader import (
     config_fingerprint,
     get_config,
     load_agent,
-    load_agent_manifests,
     load_all_agents,
-    load_manifest,
     load_meta_instruction,
+    load_personality_core,
     load_providers,
     resolve_prism_manifest,
 )
@@ -36,10 +35,9 @@ __all__ = [
     "ProvidersFile",
     "ToolsConfig",
     "load_agent",
-    "load_agent_manifests",
     "load_all_agents",
-    "load_manifest",
     "load_meta_instruction",
+    "load_personality_core",
     "load_providers",
     "resolve_prism_manifest",
 ]

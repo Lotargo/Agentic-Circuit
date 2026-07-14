@@ -1,4 +1,4 @@
-"""Configuration loading with env substitution and manifest resolution."""
+"""Configuration loading with env substitution and shared persona resolution."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from .schema import AgentConfig, AgentRole, PrismName, Provider, ProvidersFile
+from .schema import AgentConfig, AgentRole, PrismName, ProvidersFile
 
 
 def _find_config_dir() -> Path:
@@ -31,6 +31,8 @@ def _find_config_dir() -> Path:
 CONFIG_DIR = _find_config_dir()
 AGENTS_DIR = CONFIG_DIR / "agents"
 MANIFESTS_DIR = CONFIG_DIR / "manifests"
+PRISMS_DIR = MANIFESTS_DIR / "prisms"
+PERSONALITY_CORE_PATH = MANIFESTS_DIR / "personality_core.md"
 
 
 def _substitute_env(value: str) -> str:
@@ -73,20 +75,21 @@ def load_all_agents(agents_dir: Optional[Path] = None) -> dict[str, AgentConfig]
     agents: dict[str, AgentConfig] = {}
     for path in sorted(agents_dir.glob("*.yaml")):
         agent = load_agent(path)
+        if agent.name in agents:
+            raise ValueError(f"Duplicate agent name: {agent.name}")
         agents[agent.name] = agent
     return agents
 
 
-def load_manifest(agent_name: str, manifest_file: str) -> str:
-    path = MANIFESTS_DIR / agent_name / manifest_file
-    if not path.exists():
-        raise FileNotFoundError(f"Manifest not found: {path}")
-    return path.read_text(encoding="utf-8")
+def load_personality_core() -> str:
+    if not PERSONALITY_CORE_PATH.exists():
+        raise FileNotFoundError(f"Personality core not found: {PERSONALITY_CORE_PATH}")
+    return PERSONALITY_CORE_PATH.read_text(encoding="utf-8")
 
 
 def resolve_prism_manifest(agent: AgentConfig, prism: PrismName | str | None) -> str | None:
-    """Return exactly one allowed manifest for the requested/default prism."""
-    if agent.is_router or agent.is_synthesis or not agent.manifests:
+    """Return one shared emotional prism allowed by the current agent config."""
+    if agent.is_router or not agent.manifests:
         return None
     selected = str(prism or agent.default_prism)
     filename = f"{selected}.md"
@@ -94,13 +97,10 @@ def resolve_prism_manifest(agent: AgentConfig, prism: PrismName | str | None) ->
         filename = f"{agent.default_prism}.md"
     if filename not in agent.manifests:
         return None
-    return load_manifest(agent.name, filename)
-
-
-def load_agent_manifests(agent: AgentConfig) -> list[str]:
-    """Compatibility helper; callers should prefer ``resolve_prism_manifest``."""
-    manifest = resolve_prism_manifest(agent, agent.default_prism)
-    return [manifest] if manifest else []
+    path = PRISMS_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Shared prism manifest not found: {path}")
+    return path.read_text(encoding="utf-8")
 
 
 def load_meta_instruction(agent: AgentConfig) -> Optional[str]:
@@ -113,7 +113,6 @@ def load_meta_instruction(agent: AgentConfig) -> Optional[str]:
 
 
 def config_fingerprint(config_dir: Optional[Path] = None) -> str:
-    """Hash all YAML/Markdown configuration files for cheap hot reload checks."""
     root = config_dir or CONFIG_DIR
     digest = hashlib.sha256()
     paths = sorted(
@@ -130,6 +129,46 @@ def config_fingerprint(config_dir: Optional[Path] = None) -> str:
 class CircuitConfig(BaseModel):
     providers: ProvidersFile = Field(default_factory=ProvidersFile)
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_topology(self) -> "CircuitConfig":
+        routers = [agent for agent in self.agents.values() if agent.is_router]
+        synthesis = [agent for agent in self.agents.values() if agent.is_synthesis]
+        if len(routers) != 1:
+            raise ValueError("Configuration must define exactly one router")
+        if len(synthesis) != 1:
+            raise ValueError("Configuration must define exactly one synthesis agent")
+
+        by_circuit: dict[str, dict[AgentRole, AgentConfig]] = {}
+        for agent in self.agents.values():
+            if agent.model.provider not in self.providers.providers:
+                raise ValueError(
+                    f"Agent {agent.name} references unknown provider {agent.model.provider}"
+                )
+            provider = self.providers.providers[agent.model.provider]
+            if provider.models and agent.model.model not in provider.models:
+                raise ValueError(
+                    f"Agent {agent.name} references model {agent.model.model} "
+                    f"not declared by provider {agent.model.provider}"
+                )
+            if agent.role in (AgentRole.router, AgentRole.synthesis):
+                continue
+            if not agent.circuit:
+                raise ValueError(f"Agent {agent.name} has no circuit")
+            if agent.tools.rag and not agent.collection:
+                raise ValueError(f"RAG-enabled agent {agent.name} requires collection")
+            by_circuit.setdefault(agent.circuit, {})[agent.role] = agent
+
+        for circuit, phases in by_circuit.items():
+            if set(phases) != {AgentRole.circuit_phase1, AgentRole.circuit_phase2}:
+                raise ValueError(f"Circuit {circuit} must contain phase-1 and phase-2")
+            first = phases[AgentRole.circuit_phase1]
+            second = phases[AgentRole.circuit_phase2]
+            if first.collection != second.collection:
+                raise ValueError(
+                    f"Circuit {circuit} phases must use the same RAG collection"
+                )
+        return self
 
     @classmethod
     def from_disk(cls, config_dir: Optional[Path] = None) -> "CircuitConfig":
@@ -156,6 +195,14 @@ class CircuitConfig(BaseModel):
             for agent in self.agents.values()
             if agent.role not in (AgentRole.router, AgentRole.synthesis)
         ]
+
+    @property
+    def circuit_collections(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for agent in self.circuit_agents:
+            if agent.circuit and agent.collection:
+                result[agent.circuit] = agent.collection
+        return result
 
 
 @lru_cache(maxsize=1)
