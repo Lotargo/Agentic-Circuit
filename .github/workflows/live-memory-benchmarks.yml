@@ -15,9 +15,14 @@ on:
         description: Deterministic sampling seed
         required: false
         default: "20260714"
-  pull_request:
-    branches:
-      - main
+      fallback_model:
+        description: Benchmark fallback model for memory selection, extraction and reader requests
+        required: false
+        default: "mimo-v2.5-free"
+      judge_model:
+        description: External semantic judge model
+        required: false
+        default: "mimo-v2.5-free"
   schedule:
     # GitHub cron cannot express an exact 72-hour interval. A tiny daily gate below
     # runs the expensive job only when the UTC date is three days from the anchor.
@@ -34,7 +39,7 @@ concurrency:
 jobs:
   cadence:
     name: Three-day cadence gate
-    if: github.event_name == 'pull_request' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.gate.outputs.run }}
@@ -43,7 +48,7 @@ jobs:
         name: Decide whether to run
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -77,8 +82,8 @@ jobs:
       BENCH_LONGMEMEVAL_CASES: ${{ inputs.longmemeval_cases || '6' }}
       BENCH_LOCOMO_CASES: ${{ inputs.locomo_cases || '8' }}
       BENCH_SEED: ${{ inputs.seed || '20260714' }}
-      BENCH_FALLBACK_MODEL: deepseek-v4-flash-free
-      BENCH_JUDGE_MODEL: deepseek-v4-flash-free
+      BENCH_FALLBACK_MODEL: ${{ inputs.fallback_model || 'mimo-v2.5-free' }}
+      BENCH_JUDGE_MODEL: ${{ inputs.judge_model || 'mimo-v2.5-free' }}
       BENCH_REGISTRY_CATEGORY: live-memory-adapted-v1
       # External scores and live extraction cases are informational until a baseline
       # exists. A separate deterministic checker below still blocks leakage regressions.
@@ -108,7 +113,7 @@ jobs:
           [ -n "${DATABASE_DIRECT_URL:-}" ] && echo "::add-mask::$DATABASE_DIRECT_URL"
           [ -n "${DATABASE_URL:-}" ] && echo "::add-mask::$DATABASE_URL"
 
-      - name: Configure Experiment A provider chain
+      - name: Configure benchmark provider chain
         shell: bash
         run: |
           python - <<'PY'
@@ -132,8 +137,9 @@ jobs:
               print(f"{path}: big-pickle -> {fallback}")
 
           providers = Path("config/providers.yaml").read_text(encoding="utf-8")
-          if f"      - {fallback}" not in providers:
-              raise RuntimeError(f"benchmark fallback model is not declared: {fallback}")
+          for model in (fallback, os.environ["BENCH_JUDGE_MODEL"]):
+              if f"      - {model}" not in providers:
+                  raise RuntimeError(f"benchmark model is not declared: {model}")
           PY
 
       - name: Restore benchmark and model caches
