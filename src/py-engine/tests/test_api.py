@@ -156,6 +156,32 @@ def test_projects_are_isolated_inside_same_user_scope():
     assert first.project_id != second.project_id
 
 
+def test_same_user_is_isolated_between_workspaces():
+    client = TestClient(main.app)
+    first_request = client.build_request(
+        "POST",
+        "/",
+        headers={
+            "X-OpenWebUI-User-Id": "oleg",
+            "X-OpenWebUI-Workspace-Id": "workspace-a",
+        },
+        json={},
+    )
+    second_request = client.build_request(
+        "POST",
+        "/",
+        headers={
+            "X-OpenWebUI-User-Id": "oleg",
+            "X-OpenWebUI-Workspace-Id": "workspace-b",
+        },
+        json={},
+    )
+    first = main._memory_context(first_request, {})
+    second = main._memory_context(second_request, {})
+    assert first.workspace_id != second.workspace_id
+    assert first.scope != second.scope
+
+
 def test_invalid_final_message_is_rejected():
     client = TestClient(main.app)
     response = client.post(
