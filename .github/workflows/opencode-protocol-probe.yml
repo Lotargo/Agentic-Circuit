@@ -2,6 +2,12 @@ name: OpenCode protocol probe
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/experiment-a-deepseek-provider
+    paths:
+      - .github/workflows/opencode-protocol-probe.yml
+      - src/py-engine/scripts/probe_opencode_protocols.py
   pull_request:
     branches: [main]
     paths:
@@ -13,7 +19,7 @@ permissions:
 
 jobs:
   probe:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
