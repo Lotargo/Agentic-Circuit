@@ -41,6 +41,7 @@ class MemoryContext:
 
 class MemoryCandidate(BaseModel):
     should_store: bool = True
+    sensitive: bool = False
     memory_type: MemoryType
     canonical_key: str = Field(min_length=3, max_length=160)
     content: str = Field(min_length=1, max_length=6000)
