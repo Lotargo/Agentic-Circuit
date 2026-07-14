@@ -8,7 +8,7 @@ This document is the starting point for the next development session. It records
 
 Repository: `Lotargo/chat-openwebui`
 
-Current `main` commit at the end of this session:
+Implementation baseline commit summarized by this handoff, before the documentation-only merge:
 
 ```text
 c419434f8f7f07a5da26b8095e458f997f21d5b6
