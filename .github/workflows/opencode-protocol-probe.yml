@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify Zen key
+      - name: Verify configured keys
         shell: bash
         run: |
           test -n "$OPENCODE_ZEN_API_KEY" || {
