@@ -2,9 +2,18 @@
 
 Last updated: 2026-07-14
 
-This document is the starting point for the next development session. It records the current benchmark infrastructure, three comparable stored runs, the completed provider experiment and the next isolated experiment.
+> Local provider debugging now takes priority over the next full benchmark run.
+> Continue first from `docs/LOCAL_PROVIDER_DEBUG_HANDOFF.md`.
+
+This document records the benchmark infrastructure, three comparable stored runs, the completed provider experiment and the later isolated experiments. It is no longer the first operational step for the next session: provider and model failures must first be reproduced locally without depending on CI.
 
 ## Start here
+
+Primary continuation document:
+
+```text
+docs/LOCAL_PROVIDER_DEBUG_HANDOFF.md
+```
 
 Repository:
 
@@ -233,6 +242,8 @@ Decision:
 - retain configurable manual fallback and judge inputs;
 - keep scheduled MiMo defaults until a provider passes a controlled run.
 
+The meaning of the empty judge responses remains unresolved. Do not treat them as proof of a model-side outage until the local raw HTTP, OpenAI SDK and project-client probe from `docs/LOCAL_PROVIDER_DEBUG_HANDOFF.md` is complete.
+
 ## Provider alias finding
 
 Successful requests made with the primary model name `big-pickle` were reported by OpenCode Zen as:
@@ -295,9 +306,9 @@ Token F1 changes materially while retrieval is identical. Translation, inflectio
 
 Do not interpret Token F1 as answer correctness without a reliable semantic judge and output-format diagnostics.
 
-## Next experiment: Experiment B
+## Next experiment after local provider debugging: Experiment B
 
-Experiment B is now the immediate next task.
+Experiment B remains the next benchmark experiment, but it is blocked on understanding and stabilizing the provider path locally.
 
 Add explicit observability and metric separation without changing selector, reader, retrieval or fusion behavior.
 
@@ -402,11 +413,13 @@ For every comparison:
 
 ## Immediate task for the next session
 
-1. Read this file and `docs/MEMORY_BENCHMARK_EXPERIMENT_A.md`.
-2. Keep scheduled provider defaults unchanged.
-3. Implement Experiment B metrics and case-level diagnostics.
-4. Add tests for judge outcome classification and selected-recall calculation.
-5. Run the same `6 / 8 / 20260714` subset.
-6. Query Neon and compare against runs `29304658723`, `29309563088` and `29312255221`.
-7. Only after Experiment B results decide whether to proceed to neutral reader or selector fallback.
-8. Do not begin RRF-versus-RSF work yet.
+1. Read `docs/LOCAL_PROVIDER_DEBUG_HANDOFF.md` first.
+2. Move provider debugging to the local machine and keep API keys outside Git.
+3. Compare raw HTTP, OpenAI SDK and the project client using a simple JSON prompt and the real judge prompt.
+4. Test at 80, 256 and 1024 output tokens.
+5. Select only OpenAI-compatible candidate models for the immediate migration.
+6. Do not change production model defaults until the response shape and failure category are proven.
+7. Run a small local provider-role matrix before starting Qdrant or full datasets.
+8. After local stabilization, implement Experiment B diagnostics.
+9. Only then run the fixed `6 / 8 / 20260714` benchmark and compare against runs `29304658723`, `29309563088` and `29312255221`.
+10. Do not begin RRF-versus-RSF work yet.
