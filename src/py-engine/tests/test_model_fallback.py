@@ -80,8 +80,12 @@ async def test_completion_uses_fallback_after_primary_error():
     assert result.content == "ok"
     assert result.fallback_used is True
     assert result.attempted_models == ["primary", "fallback"]
+    assert "primary unavailable" in result.fallback_reason
     assert [call["model"] for call in completions.calls] == ["primary", "fallback"]
-    assert client.usage_snapshot()["fallback_successes"] == 1
+    usage = client.usage_snapshot()
+    assert usage["fallback_successes"] == 1
+    assert usage["fallback_reasons"] == {result.fallback_reason: 1}
+    assert usage["successes_by_role_and_model"]["other"] == {"fallback": 1}
 
 
 async def test_completion_retries_same_model_without_thinking_before_fallback():
@@ -97,10 +101,59 @@ async def test_completion_retries_same_model_without_thinking_before_fallback():
     assert result.content == "ok"
     assert result.fallback_used is False
     assert result.parameter_fallback_used is True
+    assert "unsupported thinking" in result.parameter_retry_reason
     assert [call["model"] for call in completions.calls] == ["primary", "primary"]
     assert "extra_body" in completions.calls[0]
     assert "extra_body" not in completions.calls[1]
-    assert client.usage_snapshot()["parameter_fallback_successes"] == 1
+    usage = client.usage_snapshot()
+    assert usage["parameter_fallback_successes"] == 1
+    assert usage["parameter_retry_reasons"] == {result.parameter_retry_reason: 1}
+
+
+async def test_judge_role_records_model_and_parse_failure_sample():
+    client, _ = client_with([response("not-json", "fallback")])
+    judge_messages = [
+        {
+            "role": "user",
+            "content": "Judge whether the candidate answer is semantically correct. Return JSON only.",
+        }
+    ]
+    judge_config = ModelConfig(provider="provider", model="fallback")
+
+    result = await client.acomplete(judge_messages, judge_config)
+
+    assert result.content == "not-json"
+    usage = client.usage_snapshot()
+    assert usage["successes_by_role_and_model"]["benchmark_judge"] == {"fallback": 1}
+    assert usage["judge_parse_errors"] == {"missing_json_object": 1}
+    assert usage["judge_parse_failure_samples"] == [
+        {
+            "error": "missing_json_object",
+            "model": "fallback",
+            "attempted_models": ["fallback"],
+            "fallback_reason": "",
+            "parameter_retry_reason": "",
+            "raw_response": "not-json",
+        }
+    ]
+
+
+async def test_judge_role_counts_empty_response_without_storing_raw_response():
+    client, _ = client_with([response("   ", "fallback")])
+    judge_messages = [
+        {
+            "role": "user",
+            "content": "Judge whether the candidate answer is semantically correct. Return JSON only.",
+        }
+    ]
+    judge_config = ModelConfig(provider="provider", model="fallback")
+
+    result = await client.acomplete(judge_messages, judge_config)
+
+    assert result.error
+    usage = client.usage_snapshot()
+    assert usage["judge_empty_responses"] == 1
+    assert usage["judge_parse_failure_samples"] == []
 
 
 async def test_stream_uses_fallback_only_before_first_token():
