@@ -20,7 +20,9 @@ manifests:
 default_prism: neutral
 model:
   provider: opencode-zen
-  model: hy3-free
+  model: big-pickle
+  fallback_models:
+    - mimo-v2.5-free
   temperature: 0.65
   max_tokens: 2048
   top_p: 0.9
