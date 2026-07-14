@@ -44,6 +44,7 @@ async def test_extract_accepts_durable_memories_and_applies_default_ttl():
               "memories": [
                 {
                   "should_store": true,
+                  "sensitive": false,
                   "memory_type": "project_decision",
                   "canonical_key": "project.database.choice",
                   "content": "Для проекта выбран Neon",
@@ -54,6 +55,7 @@ async def test_extract_accepts_durable_memories_and_applies_default_ttl():
                 },
                 {
                   "should_store": true,
+                  "sensitive": false,
                   "memory_type": "assistant_conclusion",
                   "canonical_key": "project.database.risk",
                   "content": "Возможен риск миграции",
@@ -64,6 +66,7 @@ async def test_extract_accepts_durable_memories_and_applies_default_ttl():
                 },
                 {
                   "should_store": true,
+                  "sensitive": false,
                   "memory_type": "temporary_context",
                   "canonical_key": "conversation.random",
                   "content": "Случайная мелочь",
@@ -91,6 +94,56 @@ async def test_extract_accepts_durable_memories_and_applies_default_ttl():
     assert memories[0].ttl_days is None
     assert memories[1].ttl_days == 30
     assert "MEMORY_EXTRACT" in client.calls[0][0]["content"]
+
+
+async def test_extract_keeps_valid_siblings_and_rejects_flagged_entries():
+    client = QueueClient(
+        [
+            """{
+              "memories": [
+                {
+                  "should_store": true,
+                  "sensitive": false,
+                  "memory_type": "user_fact",
+                  "canonical_key": "ключ с кириллицей",
+                  "content": "invalid key",
+                  "source": "user_explicit",
+                  "confidence": 0.99,
+                  "importance": 0.9
+                },
+                {
+                  "should_store": true,
+                  "sensitive": true,
+                  "memory_type": "temporary_context",
+                  "canonical_key": "conversation.private_value",
+                  "content": "must be rejected",
+                  "source": "user_explicit",
+                  "confidence": 0.99,
+                  "importance": 0.9,
+                  "ttl_days": 1
+                },
+                {
+                  "should_store": true,
+                  "sensitive": false,
+                  "memory_type": "negative_preference",
+                  "canonical_key": "user.preference.hr.long_dash",
+                  "content": "Не использовать длинные тире в ответах HR",
+                  "source": "user_explicit",
+                  "confidence": 0.95,
+                  "importance": 0.8
+                }
+              ]
+            }"""
+        ]
+    )
+    manager = MemoryManager(CircuitConfig.from_disk().memory, Registry(client))
+    memories = await manager.extract(
+        [{"role": "user", "content": "Не используй длинные тире для HR"}],
+        "Поняла",
+    )
+    assert [item.canonical_key for item in memories] == [
+        "user.preference.hr.long_dash"
+    ]
 
 
 async def test_extract_returns_empty_on_invalid_or_nonconforming_json():
