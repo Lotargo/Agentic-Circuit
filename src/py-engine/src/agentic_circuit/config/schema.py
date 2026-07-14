@@ -23,6 +23,7 @@ PrismName = Literal[
 class AgentRole(str, Enum):
     router = "router"
     synthesis = "synthesis"
+    memory = "memory"
     circuit_phase1 = "circuit_phase1"
     circuit_phase2 = "circuit_phase2"
 
@@ -79,8 +80,12 @@ class AgentConfig(BaseModel):
         return self.role == AgentRole.router
 
     @property
+    def is_memory(self) -> bool:
+        return self.role == AgentRole.memory
+
+    @property
     def circuit(self) -> Optional[str]:
         """Circuit name derived from agent name (e.g. creative-1 -> creative)."""
-        if self.role in (AgentRole.router, AgentRole.synthesis):
+        if self.role in (AgentRole.router, AgentRole.synthesis, AgentRole.memory):
             return None
         return self.name.rsplit("-", 1)[0]
