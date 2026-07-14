@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Literal
 
@@ -33,6 +34,15 @@ class MemoryContext:
     workspace_id: str = ""
     project_id: str = ""
     conversation_id: str = ""
+
+    def __post_init__(self) -> None:
+        # The API hashes raw user and workspace identifiers separately. Fold both
+        # hashes into the final scope so the same account cannot leak memory across
+        # independent workspaces while no original identifier reaches storage.
+        if self.scope and self.workspace_id:
+            material = f"{self.scope}\x1f{self.workspace_id}".encode("utf-8")
+            digest = hashlib.sha256(material).hexdigest()
+            object.__setattr__(self, "scope", f"user:{digest}")
 
     @property
     def enabled(self) -> bool:
