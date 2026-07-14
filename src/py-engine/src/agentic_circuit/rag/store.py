@@ -1,8 +1,9 @@
-"""Scoped Qdrant memory with dense + BM25 retrieval and final reranking.
+"""Scoped Qdrant memory with hybrid retrieval and lifecycle-aware ranking.
 
 Persistent retrieval is disabled when no stable user scope is available. Every
-stored point carries provenance, and legacy unscoped points are intentionally
-ignored to prevent cross-user context leakage.
+new point carries a logical memory type, project/conversation namespaces,
+confidence, importance, expiry and supersession metadata. Legacy unscoped points
+are intentionally ignored to prevent cross-user context leakage.
 """
 
 from __future__ import annotations
@@ -11,8 +12,8 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Iterable, Optional
 
 from .bm25 import BM25Index
 from .embeddings import EmbeddingClient
@@ -28,6 +29,39 @@ MIN_DENSE_SCORE = float(os.environ.get("RAG_MIN_DENSE_SCORE", "0.0"))
 QDRANT_RETRY_SECONDS = float(os.environ.get("QDRANT_RETRY_SECONDS", "30"))
 MAX_MEMORY_CHARS = int(os.environ.get("RAG_MAX_MEMORY_CHARS", "6000"))
 MAX_QUERY_CHARS = int(os.environ.get("RAG_MAX_QUERY_CHARS", "2000"))
+MAX_SCOPE_RECORDS = int(os.environ.get("RAG_MAX_SCOPE_RECORDS", "2000"))
+
+_SOURCE_QUALITY = {
+    "user_explicit": 1.0,
+    "user_correction": 1.0,
+    "project_decision": 0.95,
+    "assistant_verified": 0.72,
+    "synthesis": 0.62,
+}
+_HALF_LIFE_DAYS = {
+    "temporary_context": 7.0,
+    "project_state": 30.0,
+    "assistant_conclusion": 45.0,
+    "relationship_context": 180.0,
+    "project_decision": 365.0,
+    "user_preference": 730.0,
+    "negative_preference": 730.0,
+    "user_fact": 1460.0,
+}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -42,21 +76,46 @@ class MemoryHit:
     query: str = ""
     prism: str = "neutral"
     created_at: str = ""
+    updated_at: str = ""
+    memory_type: str = "assistant_conclusion"
+    canonical_key: str = ""
+    project_id: str = ""
+    conversation_id: str = ""
+    confidence: float = 0.7
+    importance: float = 0.5
+    source_quality: float = 0.7
+    status: str = "active"
+    expires_at: str = ""
+    superseded_by: str = ""
 
     def prompt_text(self) -> str:
-        metadata = [f"source={self.source}", f"kind={self.kind}"]
+        metadata = [
+            f"source={self.source}",
+            f"type={self.memory_type}",
+            f"confidence={self.confidence:.2f}",
+            f"importance={self.importance:.2f}",
+        ]
         if self.created_at:
             metadata.append(f"created_at={self.created_at}")
-        if self.prism:
-            metadata.append(f"prism={self.prism}")
+        if self.project_id:
+            metadata.append("project=scoped")
         lines = [f"[{', '.join(metadata)}]"]
         if self.query:
-            lines.append(f"Прошлый запрос: {self.query}")
-        lines.append(f"Прошлый вывод: {self.text}")
+            lines.append(f"Прошлый контекст: {self.query}")
+        lines.append(f"Память: {self.text}")
         return "\n".join(lines)
 
     def rerank_text(self) -> str:
-        return f"Запрос: {self.query}\nВывод: {self.text}" if self.query else self.text
+        prefix = f"Тип памяти: {self.memory_type}. "
+        if self.query:
+            return f"{prefix}Контекст: {self.query}\nПамять: {self.text}"
+        return f"{prefix}{self.text}"
+
+    def is_active(self, now: datetime | None = None) -> bool:
+        if self.status != "active":
+            return False
+        expires = _parse_datetime(self.expires_at)
+        return not expires or expires > (now or _utcnow())
 
 
 class VectorMemory:
@@ -117,10 +176,11 @@ class VectorMemory:
     def _remember(self, hit: MemoryHit, vector: list[float] | None = None) -> None:
         records = self._records.setdefault(hit.scope, {})
         records[hit.doc_id] = hit
-        self._bm25.setdefault(hit.scope, BM25Index()).add(
-            hit.doc_id,
-            hit.rerank_text(),
-        )
+        index = self._bm25.setdefault(hit.scope, BM25Index())
+        if hit.is_active():
+            index.add(hit.doc_id, hit.rerank_text())
+        else:
+            index.remove(hit.doc_id)
         if vector is not None:
             self._vectors.setdefault(hit.scope, {})[hit.doc_id] = vector
 
@@ -138,17 +198,34 @@ class VectorMemory:
         point_scope = payload.get("scope")
         if not isinstance(text, str) or point_scope != scope:
             return None
+        source = str(payload.get("source") or collection)
         return MemoryHit(
             doc_id=str(point.id),
             text=text[:MAX_MEMORY_CHARS],
             score=score,
             collection=collection,
             scope=scope,
-            kind=str(payload.get("kind") or "memory"),
-            source=str(payload.get("source") or collection),
+            kind=str(payload.get("kind") or payload.get("memory_type") or "memory"),
+            source=source,
             query=str(payload.get("query") or "")[:MAX_QUERY_CHARS],
             prism=str(payload.get("prism") or "neutral"),
             created_at=str(payload.get("created_at") or ""),
+            updated_at=str(payload.get("updated_at") or payload.get("created_at") or ""),
+            memory_type=str(
+                payload.get("memory_type")
+                or ("assistant_conclusion" if source in {"synthesis", collection} else "memory")
+            ),
+            canonical_key=str(payload.get("canonical_key") or ""),
+            project_id=str(payload.get("project_id") or ""),
+            conversation_id=str(payload.get("conversation_id") or ""),
+            confidence=float(payload.get("confidence") or 0.7),
+            importance=float(payload.get("importance") or 0.5),
+            source_quality=float(
+                payload.get("source_quality") or _SOURCE_QUALITY.get(source, 0.7)
+            ),
+            status=str(payload.get("status") or "active"),
+            expires_at=str(payload.get("expires_at") or ""),
+            superseded_by=str(payload.get("superseded_by") or ""),
         )
 
     async def ensure_collection(self) -> None:
@@ -166,15 +243,22 @@ class VectorMemory:
                         distance=models.Distance.COSINE,
                     ),
                 )
-            try:
-                await client.create_payload_index(
-                    collection_name=self.collection,
-                    field_name="scope",
-                    field_schema=models.PayloadSchemaType.KEYWORD,
-                )
-            except Exception:
-                # Existing indexes and older Qdrant versions are both harmless.
-                pass
+            for field_name in (
+                "scope",
+                "project_id",
+                "conversation_id",
+                "memory_type",
+                "canonical_key",
+                "status",
+            ):
+                try:
+                    await client.create_payload_index(
+                        collection_name=self.collection,
+                        field_name=field_name,
+                        field_schema=models.PayloadSchemaType.KEYWORD,
+                    )
+                except Exception:
+                    pass
         except Exception:
             self._mark_qdrant_failure()
 
@@ -187,11 +271,11 @@ class VectorMemory:
         loaded: list[MemoryHit] = []
         try:
             offset = None
-            while True:
+            while len(loaded) < MAX_SCOPE_RECORDS:
                 points, offset = await client.scroll(
                     collection_name=self.collection,
                     scroll_filter=self._scope_filter(scope),
-                    limit=256,
+                    limit=min(256, MAX_SCOPE_RECORDS - len(loaded)),
                     offset=offset,
                     with_payload=True,
                     with_vectors=False,
@@ -206,12 +290,56 @@ class VectorMemory:
             self._mark_qdrant_failure()
             return
 
-        records = self._records.setdefault(scope, {})
-        records.update({hit.doc_id: hit for hit in loaded})
-        self._bm25.setdefault(scope, BM25Index()).add_many(
-            (hit.doc_id, hit.rerank_text()) for hit in loaded
-        )
+        for hit in loaded:
+            self._remember(hit)
         self._hydrated_scopes.add(scope)
+
+    async def _set_status(
+        self,
+        scope: str,
+        doc_ids: Iterable[str],
+        *,
+        status: str,
+        superseded_by: str = "",
+    ) -> None:
+        ids = [doc_id for doc_id in dict.fromkeys(doc_ids) if doc_id]
+        if not ids:
+            return
+        now = _utcnow().isoformat()
+        records = self._records.setdefault(scope, {})
+        for doc_id in ids:
+            hit = records.get(doc_id)
+            if hit is not None:
+                self._remember(
+                    replace(
+                        hit,
+                        status=status,
+                        superseded_by=superseded_by,
+                        updated_at=now,
+                    )
+                )
+        client = self._ensure_qdrant()
+        if client is not None:
+            try:
+                await client.set_payload(
+                    collection_name=self.collection,
+                    points=ids,
+                    payload={
+                        "status": status,
+                        "superseded_by": superseded_by,
+                        "updated_at": now,
+                    },
+                )
+            except Exception:
+                self._mark_qdrant_failure()
+
+    async def supersede(self, scope: str, doc_ids: Iterable[str], new_doc_id: str) -> None:
+        await self._set_status(
+            scope,
+            doc_ids,
+            status="superseded",
+            superseded_by=new_doc_id,
+        )
 
     async def upsert(
         self,
@@ -223,6 +351,15 @@ class VectorMemory:
         query: str = "",
         prism: str = "neutral",
         doc_id: Optional[str] = None,
+        memory_type: str | None = None,
+        canonical_key: str = "",
+        project_id: str = "",
+        conversation_id: str = "",
+        confidence: float = 0.7,
+        importance: float = 0.5,
+        source_quality: float | None = None,
+        ttl_days: int | None = None,
+        supersede_existing: bool = True,
     ) -> str:
         text = text.strip()[:MAX_MEMORY_CHARS]
         query = query.strip()[:MAX_QUERY_CHARS]
@@ -230,21 +367,65 @@ class VectorMemory:
             return ""
 
         source = source or self.collection
+        memory_type = memory_type or kind or "memory"
+        canonical_key = canonical_key.strip().lower()[:160]
+        confidence = min(1.0, max(0.0, float(confidence)))
+        importance = min(1.0, max(0.0, float(importance)))
+        source_quality = min(
+            1.0,
+            max(0.0, float(source_quality or _SOURCE_QUALITY.get(source, 0.7))),
+        )
         fingerprint = "\x1f".join(
-            [self.collection, scope, kind, source, query, prism, text]
+            [
+                self.collection,
+                scope,
+                project_id,
+                memory_type,
+                canonical_key,
+                text,
+            ]
         )
         doc_id = doc_id or str(uuid.uuid5(uuid.NAMESPACE_URL, fingerprint))
+        now = _utcnow()
+        expires_at = (
+            (now + timedelta(days=ttl_days)).isoformat() if ttl_days else ""
+        )
+
+        await self._ensure_scope_loaded(scope)
+        existing = self._records.get(scope, {})
+        same_key = [
+            hit.doc_id
+            for hit in existing.values()
+            if hit.doc_id != doc_id
+            and hit.is_active(now)
+            and canonical_key
+            and hit.canonical_key == canonical_key
+            and hit.project_id == project_id
+        ]
+
+        previous = existing.get(doc_id)
+        created_at = previous.created_at if previous and previous.created_at else now.isoformat()
         hit = MemoryHit(
             doc_id=doc_id,
             text=text,
             score=0.0,
             collection=self.collection,
             scope=scope,
-            kind=kind,
+            kind=memory_type,
             source=source,
             query=query,
             prism=prism,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=created_at,
+            updated_at=now.isoformat(),
+            memory_type=memory_type,
+            canonical_key=canonical_key,
+            project_id=project_id,
+            conversation_id=conversation_id,
+            confidence=confidence,
+            importance=importance,
+            source_quality=source_quality,
+            status="active",
+            expires_at=expires_at,
         )
         embedding_text = hit.rerank_text()
         try:
@@ -257,9 +438,9 @@ class VectorMemory:
                     f"EMBEDDING_VECTOR_SIZE={self._vector_size}"
                 )
         except Exception:
-            # Keep a process-local lexical memory even when dense persistence is
-            # unavailable; the caller still receives the error for observability.
             self._remember(hit)
+            if supersede_existing and same_key:
+                await self.supersede(scope, same_key, doc_id)
             raise
 
         self._remember(hit, vector)
@@ -282,12 +463,25 @@ class VectorMemory:
                                 "query": hit.query,
                                 "prism": hit.prism,
                                 "created_at": hit.created_at,
+                                "updated_at": hit.updated_at,
+                                "memory_type": hit.memory_type,
+                                "canonical_key": hit.canonical_key,
+                                "project_id": hit.project_id,
+                                "conversation_id": hit.conversation_id,
+                                "confidence": hit.confidence,
+                                "importance": hit.importance,
+                                "source_quality": hit.source_quality,
+                                "status": hit.status,
+                                "expires_at": hit.expires_at,
+                                "superseded_by": "",
                             },
                         )
                     ],
                 )
             except Exception:
                 self._mark_qdrant_failure()
+        if supersede_existing and same_key:
+            await self.supersede(scope, same_key, doc_id)
         return doc_id
 
     async def _dense_search(
@@ -341,11 +535,75 @@ class VectorMemory:
         local.sort(key=lambda item: item.score, reverse=True)
         return local[:top_k]
 
+    @staticmethod
+    def _eligible(
+        hit: MemoryHit,
+        *,
+        project_id: str,
+        conversation_id: str,
+        memory_types: set[str] | None,
+        now: datetime,
+    ) -> bool:
+        if not hit.is_active(now):
+            return False
+        if memory_types and hit.memory_type not in memory_types:
+            return False
+        if project_id:
+            if hit.project_id and hit.project_id != project_id:
+                return False
+        elif hit.project_id:
+            return False
+        if (
+            hit.memory_type == "temporary_context"
+            and hit.conversation_id
+            and hit.conversation_id != conversation_id
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _policy_factor(
+        hit: MemoryHit,
+        *,
+        project_id: str,
+        conversation_id: str,
+        now: datetime,
+    ) -> float:
+        created = _parse_datetime(hit.updated_at or hit.created_at)
+        if created:
+            age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+            half_life = _HALF_LIFE_DAYS.get(hit.memory_type, 180.0)
+            freshness = 0.5 + 0.5 * (2 ** (-age_days / max(half_life, 1.0)))
+        else:
+            freshness = 0.7
+        if project_id:
+            project_match = 1.0 if hit.project_id == project_id else 0.72
+        else:
+            project_match = 1.0
+        conversation_match = (
+            1.0
+            if not hit.conversation_id or hit.conversation_id == conversation_id
+            else 0.88
+        )
+        confidence = 0.5 + 0.5 * hit.confidence
+        importance = 0.5 + 0.5 * hit.importance
+        return (
+            confidence
+            * importance
+            * freshness
+            * max(0.2, hit.source_quality)
+            * project_match
+            * conversation_match
+        )
+
     async def retrieve(
         self,
         query: str,
         *,
         scope: str | None,
+        project_id: str = "",
+        conversation_id: str = "",
+        memory_types: Iterable[str] | None = None,
         top_k: int = 5,
         use_rerank: bool = True,
     ) -> list[MemoryHit]:
@@ -354,12 +612,10 @@ class VectorMemory:
             return []
         await self._ensure_scope_loaded(scope)
 
-        candidate_limit = max(top_k * 3, top_k)
+        candidate_limit = max(top_k * 4, 12)
         try:
             dense = await self._dense_search(query, scope, candidate_limit)
         except Exception:
-            # Dense embeddings are optional for availability. BM25 still works on
-            # payloads already loaded from Qdrant or current-process writes.
             dense = []
         lexical = self._bm25.get(scope, BM25Index()).search(
             query,
@@ -376,6 +632,8 @@ class VectorMemory:
                 LEXICAL_WEIGHT / (RRF_K + rank)
             )
 
+        now = _utcnow()
+        allowed_types = set(memory_types) if memory_types else None
         records = self._records.get(scope, {})
         candidates = [
             replace(records[doc_id], score=score)
@@ -385,6 +643,13 @@ class VectorMemory:
                 reverse=True,
             )
             if doc_id in records
+            and self._eligible(
+                records[doc_id],
+                project_id=project_id,
+                conversation_id=conversation_id,
+                memory_types=allowed_types,
+                now=now,
+            )
         ][:candidate_limit]
 
         if use_rerank and self._rerank and candidates:
@@ -392,16 +657,31 @@ class VectorMemory:
                 ranked = await self._rerank.rerank_indices(
                     query,
                     [hit.rerank_text() for hit in candidates],
-                    top_n=top_k,
+                    top_n=candidate_limit,
                 )
-                return [
-                    replace(candidates[index], score=score)
+                candidates = [
+                    replace(candidates[index], score=max(0.0, float(score)))
                     for index, score in ranked
                     if 0 <= index < len(candidates)
                 ]
             except Exception:
                 pass
-        return candidates[:top_k]
+
+        rescored = [
+            replace(
+                hit,
+                score=hit.score
+                * self._policy_factor(
+                    hit,
+                    project_id=project_id,
+                    conversation_id=conversation_id,
+                    now=now,
+                ),
+            )
+            for hit in candidates
+        ]
+        rescored.sort(key=lambda item: item.score, reverse=True)
+        return rescored[:top_k]
 
     async def aclose(self) -> None:
         client = self._qclient
@@ -435,6 +715,9 @@ class NullMemory:
         query: str,
         *,
         scope: str | None = None,
+        project_id: str = "",
+        conversation_id: str = "",
+        memory_types: Iterable[str] | None = None,
         top_k: int = 5,
         use_rerank: bool = True,
     ) -> list[MemoryHit]:
