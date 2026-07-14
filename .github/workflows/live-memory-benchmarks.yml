@@ -126,22 +126,55 @@ jobs:
             -v "$GITHUB_WORKSPACE/.cache/tei-rerank:/data" \
             ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
 
-      - name: Wait for retrieval services
+      - name: Wait for model downloads and retrieval services
+        timeout-minutes: 35
+        shell: bash
         run: |
+          set -u
           ready=0
+          echo "First run may take several minutes while TEI downloads and loads both models."
+
           for i in {1..180}; do
-            if curl -fsS http://127.0.0.1:6633/readyz >/dev/null \
-              && curl -fsS http://127.0.0.1:8899/health >/dev/null \
-              && curl -fsS http://127.0.0.1:8898/health >/dev/null; then
+            for container in bench-qdrant bench-embedding bench-rerank; do
+              state=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || echo missing)
+              if [ "$state" != "running" ]; then
+                echo "::error::$container is not running (state=$state)"
+                docker inspect "$container" || true
+                docker logs --tail 200 "$container" || true
+                exit 1
+              fi
+            done
+
+            qdrant_ready=0
+            embedding_ready=0
+            rerank_ready=0
+            curl -fs --max-time 2 http://127.0.0.1:6633/readyz >/dev/null 2>&1 && qdrant_ready=1
+            curl -fs --max-time 2 http://127.0.0.1:8899/health >/dev/null 2>&1 && embedding_ready=1
+            curl -fs --max-time 2 http://127.0.0.1:8898/health >/dev/null 2>&1 && rerank_ready=1
+
+            if [ "$qdrant_ready" = "1" ] && [ "$embedding_ready" = "1" ] && [ "$rerank_ready" = "1" ]; then
               ready=1
+              echo "Qdrant, embedding TEI and reranker TEI are ready."
               break
+            fi
+
+            if [ "$i" = "1" ] || [ $((i % 6)) -eq 0 ]; then
+              elapsed=$((i * 10))
+              echo "Still loading after approximately ${elapsed}s: qdrant=$qdrant_ready embedding=$embedding_ready rerank=$rerank_ready"
+              docker ps --filter 'name=bench-' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+              echo "--- embedding log tail ---"
+              docker logs --tail 12 bench-embedding 2>&1 || true
+              echo "--- reranker log tail ---"
+              docker logs --tail 12 bench-rerank 2>&1 || true
             fi
             sleep 10
           done
+
           if [ "$ready" != "1" ]; then
-            docker logs bench-qdrant || true
-            docker logs bench-embedding || true
-            docker logs bench-rerank || true
+            echo "::error::Retrieval services did not become ready within 30 minutes"
+            docker logs --tail 200 bench-qdrant || true
+            docker logs --tail 200 bench-embedding || true
+            docker logs --tail 200 bench-rerank || true
             exit 1
           fi
 
@@ -162,20 +195,20 @@ jobs:
           fi
 
       - name: Upload benchmark report
-        if: always()
+        if: ${{ always() && hashFiles('benchmark-results/live/**') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: live-memory-benchmark-${{ github.run_number }}
           path: benchmark-results/live
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 90
 
-      - name: Print service logs on failure
-        if: failure()
+      - name: Print service logs on failure or cancellation
+        if: ${{ always() && (failure() || cancelled()) }}
         run: |
-          docker logs bench-qdrant || true
-          docker logs bench-embedding || true
-          docker logs bench-rerank || true
+          docker logs --tail 200 bench-qdrant || true
+          docker logs --tail 200 bench-embedding || true
+          docker logs --tail 200 bench-rerank || true
 
       - name: Normalize cache ownership
         if: always()
