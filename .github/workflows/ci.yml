@@ -104,7 +104,7 @@ jobs:
               type: openai-compatible
               base_url: http://127.0.0.1:18080/v1
               api_key_env: OPENCODE_ZEN_API_KEY
-              models: [hy3-free, mimo-v2.5-free]
+              models: [big-pickle, mimo-v2.5-free]
           YAML
       - name: Start mock provider, engine and gateway
         env:
