@@ -22,7 +22,9 @@ default_prism: neutral
 meta_instruction: synthesis_meta.md
 model:
   provider: opencode-zen
-  model: hy3-free
+  model: big-pickle
+  fallback_models:
+    - mimo-v2.5-free
   temperature: 0.65
   max_tokens: 4096
   top_p: 0.9
