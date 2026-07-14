@@ -1,0 +1,151 @@
+name: Live memory benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      longmemeval_cases:
+        description: Balanced LongMemEval-S subset size
+        required: false
+        default: "14"
+      locomo_cases:
+        description: Balanced LoCoMo-10 QA subset size
+        required: false
+        default: "15"
+      seed:
+        description: Deterministic sampling seed
+        required: false
+        default: "20260714"
+  schedule:
+    # GitHub cron has no exact every-72-hours primitive. This runs on calendar
+    # days 1, 4, 7, ... at 03:17 UTC, which is the closest stable three-day cadence.
+    - cron: "17 3 1-31/3 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-memory-benchmarks
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: LongMemEval, LoCoMo and memory safety
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      OPENCODE_ZEN_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+      CONFIG_DIR: ${{ github.workspace }}/config
+      QDRANT_URL: http://127.0.0.1:6633
+      EMBEDDING_SIDECAR_URL: http://127.0.0.1:8899
+      RERANK_SIDECAR_URL: http://127.0.0.1:8898
+      EMBEDDING_MODEL: intfloat/multilingual-e5-small
+      EMBEDDING_VECTOR_SIZE: "384"
+      RERANK_MODEL: Alibaba-NLP/gte-multilingual-reranker-base
+      BENCH_CACHE_DIR: ${{ github.workspace }}/.cache/benchmark-data
+      BENCH_OUTPUT_DIR: ${{ github.workspace }}/benchmark-results/live
+      BENCH_LONGMEMEVAL_CASES: ${{ inputs.longmemeval_cases || '14' }}
+      BENCH_LOCOMO_CASES: ${{ inputs.locomo_cases || '15' }}
+      BENCH_SEED: ${{ inputs.seed || '20260714' }}
+      BENCH_JUDGE_MODEL: mimo-v2.5-free
+      BENCH_STRICT_SAFETY: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Verify OpenCode secret
+        run: |
+          test -n "$OPENCODE_ZEN_API_KEY" || {
+            echo "OPENCODE_ZEN_API_KEY is not configured in GitHub Actions secrets"
+            exit 1
+          }
+          echo "::add-mask::$OPENCODE_ZEN_API_KEY"
+
+      - name: Restore benchmark and model caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/benchmark-data
+            .cache/tei-embedding
+            .cache/tei-rerank
+          key: live-memory-bench-v2-${{ runner.os }}-e5-small-gte-reranker
+
+      - name: Install locked Python environment
+        run: |
+          python -m pip install --upgrade uv
+          cd src/py-engine
+          uv sync --frozen --extra test
+
+      - name: Start Qdrant and TEI services
+        run: |
+          mkdir -p .cache/tei-embedding .cache/tei-rerank
+          docker run -d --name bench-qdrant \
+            -p 6633:6333 \
+            qdrant/qdrant:latest
+          docker run -d --name bench-embedding \
+            -p 8899:80 \
+            -e MODEL_ID="$EMBEDDING_MODEL" \
+            -v "$GITHUB_WORKSPACE/.cache/tei-embedding:/data" \
+            ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+          docker run -d --name bench-rerank \
+            -p 8898:80 \
+            -e MODEL_ID="$RERANK_MODEL" \
+            -v "$GITHUB_WORKSPACE/.cache/tei-rerank:/data" \
+            ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+
+      - name: Wait for retrieval services
+        run: |
+          ready=0
+          for i in {1..180}; do
+            if curl -fsS http://127.0.0.1:6633/readyz >/dev/null \
+              && curl -fsS http://127.0.0.1:8899/health >/dev/null \
+              && curl -fsS http://127.0.0.1:8898/health >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 10
+          done
+          if [ "$ready" != "1" ]; then
+            docker logs bench-qdrant || true
+            docker logs bench-embedding || true
+            docker logs bench-rerank || true
+            exit 1
+          fi
+
+      - name: Run live benchmark suites
+        working-directory: src/py-engine
+        run: uv run --frozen python -m agentic_circuit.benchmarks.runner
+
+      - name: Publish job summary
+        if: always()
+        run: |
+          if [ -f benchmark-results/live/benchmark-report.md ]; then
+            cat benchmark-results/live/benchmark-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Benchmark report was not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-memory-benchmark-${{ github.run_number }}
+          path: benchmark-results/live
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Print service logs on failure
+        if: failure()
+        run: |
+          docker logs bench-qdrant || true
+          docker logs bench-embedding || true
+          docker logs bench-rerank || true
+
+      - name: Normalize cache ownership
+        if: always()
+        run: sudo chown -R "$USER":"$USER" .cache || true
