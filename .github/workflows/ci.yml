@@ -104,13 +104,14 @@ jobs:
               type: openai-compatible
               base_url: http://127.0.0.1:18080/v1
               api_key_env: OPENCODE_ZEN_API_KEY
-              models: [hy3-free]
+              models: [hy3-free, mimo-v2.5-free]
           YAML
       - name: Start mock provider, engine and gateway
         env:
           CONFIG_DIR: /tmp/agentic-config
           OPENCODE_ZEN_API_KEY: smoke-key
           QDRANT_URL: http://127.0.0.1:16633
+          EMBEDDING_SIDECAR_URL: http://127.0.0.1:18899
           PY_ENGINE_URL: http://127.0.0.1:8823
           TS_GATEWAY_PORT: "9191"
         run: |
@@ -126,13 +127,25 @@ jobs:
             sleep 1
           done
           test "$ready" = "1"
-      - name: Verify OpenAI-compatible flow and history payload
+      - name: Verify OpenAI flow, header forwarding and memory lifecycle
         run: |
-          response=$(curl -fsS http://127.0.0.1:9191/v1/chat/completions \
-            -H 'content-type: application/json' \
+          common_headers=(
+            -H 'content-type: application/json'
+            -H 'X-OpenWebUI-User-Id: smoke-user'
+            -H 'X-OpenWebUI-Workspace-Id: smoke-workspace'
+            -H 'X-Project-Id: smoke-project'
+            -H 'X-OpenWebUI-Chat-Id: smoke-chat'
+          )
+          first=$(curl -fsS http://127.0.0.1:9191/v1/chat/completions \
+            "${common_headers[@]}" \
+            -d '{"model":"agentic-circuit","prism":"joy","messages":[{"role":"user","content":"Меня зовут Олег"}]}')
+          echo "$first" | grep -q 'SMOKE_OK'
+
+          second=$(curl -fsS http://127.0.0.1:9191/v1/chat/completions \
+            "${common_headers[@]}" \
             -d '{"model":"agentic-circuit","prism":"joy","messages":[{"role":"user","content":"Меня зовут Олег"},{"role":"assistant","content":"Запомнила"},{"role":"user","content":"Как меня зовут?"}]}')
-          echo "$response"
-          echo "$response" | grep -q 'SMOKE_OK'
+          echo "$second"
+          echo "$second" | grep -q 'SMOKE_OK'
       - name: Print logs on failure
         if: failure()
         run: |
