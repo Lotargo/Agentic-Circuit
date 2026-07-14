@@ -10,10 +10,10 @@ from agentic_circuit.providers.client import OpenAICompatibleClient
 class FakeCompletions:
     def __init__(self, values):
         self.values = list(values)
-        self.models = []
+        self.calls = []
 
     async def create(self, **kwargs):
-        self.models.append(kwargs["model"])
+        self.calls.append(kwargs)
         value = self.values.pop(0)
         if isinstance(value, Exception):
             raise value
@@ -57,15 +57,16 @@ def client_with(values):
     client._successes = Counter()
     client._failures = Counter()
     client._fallback_successes = 0
+    client._parameter_fallback_successes = 0
     return client, completions
 
 
-def config():
+def config(*, thinking_level="off"):
     return ModelConfig(
         provider="provider",
         model="primary",
         fallback_models=["fallback"],
-        thinking_level="off",
+        thinking_level=thinking_level,
     )
 
 
@@ -79,8 +80,27 @@ async def test_completion_uses_fallback_after_primary_error():
     assert result.content == "ok"
     assert result.fallback_used is True
     assert result.attempted_models == ["primary", "fallback"]
-    assert completions.models == ["primary", "fallback"]
+    assert [call["model"] for call in completions.calls] == ["primary", "fallback"]
     assert client.usage_snapshot()["fallback_successes"] == 1
+
+
+async def test_completion_retries_same_model_without_thinking_before_fallback():
+    client, completions = client_with(
+        [RuntimeError("unsupported thinking"), response("ok", "primary")]
+    )
+
+    result = await client.acomplete(
+        [{"role": "user", "content": "hello"}],
+        config(thinking_level="low"),
+    )
+
+    assert result.content == "ok"
+    assert result.fallback_used is False
+    assert result.parameter_fallback_used is True
+    assert [call["model"] for call in completions.calls] == ["primary", "primary"]
+    assert "extra_body" in completions.calls[0]
+    assert "extra_body" not in completions.calls[1]
+    assert client.usage_snapshot()["parameter_fallback_successes"] == 1
 
 
 async def test_stream_uses_fallback_only_before_first_token():
@@ -96,7 +116,7 @@ async def test_stream_uses_fallback_only_before_first_token():
     ]
 
     assert chunks == ["a", "b"]
-    assert completions.models == ["primary", "fallback"]
+    assert [call["model"] for call in completions.calls] == ["primary", "fallback"]
     assert client.usage_snapshot()["fallback_successes"] == 1
 
 
@@ -113,4 +133,4 @@ async def test_stream_does_not_restart_after_partial_output():
             received.append(chunk)
 
     assert received == ["partial"]
-    assert completions.models == ["primary"]
+    assert [call["model"] for call in completions.calls] == ["primary"]
