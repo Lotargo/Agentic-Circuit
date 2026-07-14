@@ -149,10 +149,15 @@ class CircuitConfig(BaseModel):
                     f"Agent {agent.name} references unknown provider {agent.model.provider}"
                 )
             provider = self.providers.providers[agent.model.provider]
-            if provider.models and agent.model.model not in provider.models:
+            undeclared = [
+                model_name
+                for model_name in agent.model.model_chain
+                if provider.models and model_name not in provider.models
+            ]
+            if undeclared:
                 raise ValueError(
-                    f"Agent {agent.name} references model {agent.model.model} "
-                    f"not declared by provider {agent.model.provider}"
+                    f"Agent {agent.name} references models {undeclared} not declared by "
+                    f"provider {agent.model.provider}"
                 )
             if agent.role in (AgentRole.router, AgentRole.synthesis, AgentRole.memory):
                 continue

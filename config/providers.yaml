@@ -9,7 +9,6 @@ providers:
       - north-mini-code-free
       - nemotron-3-ultra-free
       - deepseek-v4-flash-free
-      - hy3-free
   # Доп. провайдеры добавляются отсюда (в т.ч. из UI OpenWebUI через TS-слой).
   # Пример:
   # my-other-provider:
