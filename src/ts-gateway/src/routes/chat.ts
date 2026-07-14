@@ -6,6 +6,28 @@ const ENGINE_URL = (process.env.PY_ENGINE_URL || "http://localhost:8823").replac
   "",
 );
 
+const FORWARDED_CONTEXT_HEADERS = [
+  "x-openwebui-user-id",
+  "x-user-id",
+  "x-openwebui-instance-id",
+  "x-openwebui-workspace-id",
+  "x-workspace-id",
+  "x-project-id",
+  "x-openwebui-chat-id",
+  "x-conversation-id",
+] as const;
+
+function engineHeaders(req: Request): Record<string, string> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+  for (const name of FORWARDED_CONTEXT_HEADERS) {
+    const value = req.header(name);
+    if (value) headers[name] = value;
+  }
+  return headers;
+}
+
 async function forwardError(upstream: globalThis.Response, res: Response) {
   const contentType = upstream.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
@@ -24,7 +46,7 @@ export async function chatCompletions(req: Request, res: Response) {
   try {
     const upstream = await fetch(`${ENGINE_URL}/v1/chat/completions`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: engineHeaders(req),
       body: JSON.stringify(req.body),
       signal: controller.signal,
     });

@@ -89,7 +89,7 @@ def load_personality_core() -> str:
 
 def resolve_prism_manifest(agent: AgentConfig, prism: PrismName | str | None) -> str | None:
     """Return one shared emotional prism allowed by the current agent config."""
-    if agent.is_router or not agent.manifests:
+    if agent.is_router or agent.is_memory or not agent.manifests:
         return None
     selected = str(prism or agent.default_prism)
     filename = f"{selected}.md"
@@ -134,10 +134,13 @@ class CircuitConfig(BaseModel):
     def validate_topology(self) -> "CircuitConfig":
         routers = [agent for agent in self.agents.values() if agent.is_router]
         synthesis = [agent for agent in self.agents.values() if agent.is_synthesis]
+        memory = [agent for agent in self.agents.values() if agent.is_memory]
         if len(routers) != 1:
             raise ValueError("Configuration must define exactly one router")
         if len(synthesis) != 1:
             raise ValueError("Configuration must define exactly one synthesis agent")
+        if len(memory) != 1:
+            raise ValueError("Configuration must define exactly one memory manager")
 
         by_circuit: dict[str, dict[AgentRole, AgentConfig]] = {}
         for agent in self.agents.values():
@@ -151,7 +154,7 @@ class CircuitConfig(BaseModel):
                     f"Agent {agent.name} references model {agent.model.model} "
                     f"not declared by provider {agent.model.provider}"
                 )
-            if agent.role in (AgentRole.router, AgentRole.synthesis):
+            if agent.role in (AgentRole.router, AgentRole.synthesis, AgentRole.memory):
                 continue
             if not agent.circuit:
                 raise ValueError(f"Agent {agent.name} has no circuit")
@@ -189,11 +192,16 @@ class CircuitConfig(BaseModel):
         return next(agent for agent in self.agents.values() if agent.is_synthesis)
 
     @property
+    def memory(self) -> AgentConfig:
+        return next(agent for agent in self.agents.values() if agent.is_memory)
+
+    @property
     def circuit_agents(self) -> list[AgentConfig]:
         return [
             agent
             for agent in self.agents.values()
-            if agent.role not in (AgentRole.router, AgentRole.synthesis)
+            if agent.role
+            not in (AgentRole.router, AgentRole.synthesis, AgentRole.memory)
         ]
 
     @property

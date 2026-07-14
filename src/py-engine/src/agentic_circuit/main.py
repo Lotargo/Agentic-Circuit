@@ -15,11 +15,12 @@ from fastapi.responses import StreamingResponse
 
 from .config import CircuitConfig, config_fingerprint
 from .graph import CompositeMemory, EngineContext, build_graph
+from .memory import MemoryContext, MemoryManager
 from .providers import ClientRegistry
 from .rag import EmbeddingClient, RerankClient, VectorMemory
 from .tools import WebSearchTool
 
-app = FastAPI(title="agentic-circuit-engine", version="0.3.0")
+app = FastAPI(title="agentic-circuit-engine", version="0.4.0")
 LOGICAL_MODEL_ID = "agentic-circuit"
 ALLOWED_ROLES = {"user", "assistant"}
 ALLOWED_PRISMS = {
@@ -32,6 +33,11 @@ ALLOWED_PRISMS = {
     "neutral",
     "sadness",
 }
+INCLUDE_LEGACY_MEMORY = os.environ.get("RAG_INCLUDE_LEGACY_PERSPECTIVES", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 def _build_context() -> EngineContext:
@@ -41,28 +47,33 @@ def _build_context() -> EngineContext:
     rerank = RerankClient() if os.environ.get("RERANK_SIDECAR_URL") else None
     web = WebSearchTool() if os.environ.get("LANGSEARCH_API_KEY") else None
 
-    memories = {
-        circuit: VectorMemory(collection, embeddings, rerank)
-        for circuit, collection in config.circuit_collections.items()
-    }
-    conversation_memory = VectorMemory("conversation", embeddings, rerank)
-    synthesis_sources = [conversation_memory, *memories.values()]
+    legacy_memories = (
+        {
+            circuit: VectorMemory(collection, embeddings, rerank)
+            for circuit, collection in config.circuit_collections.items()
+        }
+        if INCLUDE_LEGACY_MEMORY
+        else {}
+    )
+    structured_memory = VectorMemory("memory", embeddings, rerank)
+    synthesis_sources = [structured_memory, *legacy_memories.values()]
     return EngineContext(
         config=config,
         clients=clients,
         embeddings=embeddings,
         rerank=rerank,
         web=web,
-        memories=memories,
-        conversation_memory=conversation_memory,
+        memories=legacy_memories,
+        structured_memory=structured_memory,
         synthesis_memory=CompositeMemory(synthesis_sources, rerank),
+        memory_manager=MemoryManager(config.memory, clients),
     )
 
 
 async def _initialize_memories(context: EngineContext) -> None:
     unique = {id(memory): memory for memory in context.memories.values()}
-    if context.conversation_memory is not None:
-        unique[id(context.conversation_memory)] = context.conversation_memory
+    if context.structured_memory is not None:
+        unique[id(context.structured_memory)] = context.structured_memory
     await asyncio.gather(
         *(memory.ensure_collection() for memory in unique.values()),
         return_exceptions=True,
@@ -167,14 +178,18 @@ def _string_value(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _memory_scope(request: Request, body: dict) -> str:
-    """Create a stable, non-reversible per-user namespace.
-
-    Without a trusted user identifier, persistent RAG is disabled rather than
-    falling back to one global anonymous collection namespace.
-    """
-    if body.get("memory") is False:
+def _opaque_id(prefix: str, *parts: str) -> str:
+    material = "\x1f".join(part for part in parts if part)
+    if not material:
         return ""
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+def _memory_context(request: Request, body: dict) -> MemoryContext:
+    """Build private user/workspace/project/conversation namespaces."""
+    if body.get("memory") is False:
+        return MemoryContext()
     metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
     user_id = next(
         (
@@ -190,44 +205,100 @@ def _memory_scope(request: Request, body: dict) -> str:
         "",
     )
     if not user_id:
-        return ""
+        return MemoryContext()
+
     tenant = next(
         (
             value
             for value in (
                 _string_value(request.headers.get("x-openwebui-instance-id")),
-                _string_value(metadata.get("workspace_id")),
                 _string_value(metadata.get("tenant_id")),
             )
             if value
         ),
         "default",
     )
-    digest = hashlib.sha256(f"{tenant}\x1f{user_id}".encode("utf-8")).hexdigest()
-    return f"user:{digest}"
+    workspace = next(
+        (
+            value
+            for value in (
+                _string_value(request.headers.get("x-openwebui-workspace-id")),
+                _string_value(request.headers.get("x-workspace-id")),
+                _string_value(metadata.get("workspace_id")),
+            )
+            if value
+        ),
+        tenant,
+    )
+    project = next(
+        (
+            value
+            for value in (
+                _string_value(request.headers.get("x-project-id")),
+                _string_value(metadata.get("project_id")),
+                _string_value(body.get("project_id")),
+            )
+            if value
+        ),
+        "",
+    )
+    conversation = next(
+        (
+            value
+            for value in (
+                _string_value(request.headers.get("x-openwebui-chat-id")),
+                _string_value(request.headers.get("x-conversation-id")),
+                _string_value(metadata.get("conversation_id")),
+                _string_value(metadata.get("chat_id")),
+                _string_value(body.get("conversation_id")),
+            )
+            if value
+        ),
+        "",
+    )
+    scope = _opaque_id("user", tenant, user_id)
+    workspace_id = _opaque_id("workspace", tenant, workspace)
+    project_id = _opaque_id("project", tenant, workspace, project) if project else ""
+    conversation_id = (
+        _opaque_id("conversation", scope, conversation) if conversation else ""
+    )
+    return MemoryContext(
+        scope=scope,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+    )
+
+
+def _memory_scope(request: Request, body: dict) -> str:
+    """Backward-compatible helper used by older integrations and tests."""
+    return _memory_context(request, body).scope
 
 
 def _graph_input(
     conversation: list[dict],
     prism: str,
-    memory_scope: str,
+    memory_context: MemoryContext,
 ) -> dict:
     return {
         "user_input": conversation[-1]["content"],
         "conversation": conversation,
         "prism": prism,
-        "memory_scope": memory_scope,
+        "memory_scope": memory_context.scope,
+        "workspace_id": memory_context.workspace_id,
+        "project_id": memory_context.project_id,
+        "conversation_id": memory_context.conversation_id,
     }
 
 
 async def _run(
     conversation: list[dict],
     prism: str,
-    memory_scope: str,
+    memory_context: MemoryContext,
 ) -> str:
     await RUNTIME.ensure_current()
     result = await RUNTIME.graph.ainvoke(
-        _graph_input(conversation, prism, memory_scope)
+        _graph_input(conversation, prism, memory_context)
     )
     answer = result.get("synthesis_output", "")
     if not answer:
@@ -239,11 +310,11 @@ async def _run(
 async def _stream(
     conversation: list[dict],
     prism: str,
-    memory_scope: str,
+    memory_context: MemoryContext,
 ) -> AsyncIterator[str]:
     await RUNTIME.ensure_current()
     async for event in RUNTIME.graph.astream(
-        _graph_input(conversation, prism, memory_scope),
+        _graph_input(conversation, prism, memory_context),
         stream_mode="custom",
     ):
         if isinstance(event, dict) and event.get("type") == "token":
@@ -311,7 +382,7 @@ async def chat_completions(request: Request):
     prism = str(body.get("prism") or "neutral")
     if prism not in ALLOWED_PRISMS:
         raise HTTPException(status_code=400, detail=f"unsupported prism: {prism}")
-    memory_scope = _memory_scope(request, body)
+    memory_context = _memory_context(request, body)
 
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
@@ -320,7 +391,7 @@ async def chat_completions(request: Request):
     if bool(body.get("stream", False)):
         async def event_gen() -> AsyncIterator[str]:
             try:
-                async for token in _stream(conversation, prism, memory_scope):
+                async for token in _stream(conversation, prism, memory_context):
                     yield _chunk_payload(
                         request_id=request_id,
                         created=created,
@@ -354,7 +425,7 @@ async def chat_completions(request: Request):
         )
 
     try:
-        answer = await _run(conversation, prism, memory_scope)
+        answer = await _run(conversation, prism, memory_context)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"engine failed: {exc}") from exc
 
@@ -378,17 +449,18 @@ async def chat_completions(request: Request):
 async def healthz() -> dict:
     await RUNTIME.ensure_current()
     context = RUNTIME.context
+    collections = set()
+    if context:
+        collections.update(memory.collection for memory in context.memories.values())
+        if context.structured_memory:
+            collections.add(context.structured_memory.collection)
     return {
         "status": "ok",
         "config_fingerprint": RUNTIME.fingerprint,
         "rag_initializing": bool(RUNTIME._init_task and not RUNTIME._init_task.done()),
-        "circuits": sorted(context.memories.keys()) if context else [],
-        "collections": sorted(
-            {
-                memory.collection for memory in context.memories.values()
-            }
-            | ({context.conversation_memory.collection} if context and context.conversation_memory else set())
-        ) if context else [],
+        "circuits": sorted(context.config.circuit_collections) if context else [],
+        "collections": sorted(collections),
+        "legacy_memory_enabled": INCLUDE_LEGACY_MEMORY,
     }
 
 

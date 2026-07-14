@@ -14,6 +14,7 @@ def test_load_all_agents_and_providers():
     assert "opencode-zen" in cfg.providers.providers
     assert {
         "router",
+        "memory",
         "creative-1",
         "creative-2",
         "pragmatic-1",
@@ -24,9 +25,11 @@ def test_load_all_agents_and_providers():
     } == set(cfg.agents)
 
 
-def test_router_synthesis_and_collection_topology():
+def test_router_synthesis_memory_and_collection_topology():
     cfg = CircuitConfig.from_disk()
     assert cfg.router.is_router
+    assert cfg.memory.is_memory
+    assert cfg.memory.model.temperature == 0.0
     assert cfg.synthesis.is_synthesis
     assert cfg.synthesis.meta_instruction is not None
     assert cfg.synthesis.manifests
@@ -43,6 +46,13 @@ def test_every_visible_agent_uses_same_personality_core():
     for agent in cfg.agents.values():
         prompt = assemble_system_prompt(agent, prism="joy")
         assert core in prompt
+
+
+def test_memory_manager_has_no_emotional_prism():
+    cfg = CircuitConfig.from_disk()
+    prompt = assemble_system_prompt(cfg.memory, prism="joy")
+    assert "Активная эмоциональная призма" not in prompt
+    assert resolve_prism_manifest(cfg.memory, "joy") is None
 
 
 def test_shared_prism_is_identical_across_directions():

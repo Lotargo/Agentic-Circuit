@@ -4,7 +4,9 @@ import pytest
 
 from agentic_circuit.config import CircuitConfig
 from agentic_circuit.graph import EngineContext, build_graph
+from agentic_circuit.memory import MemoryCandidate
 from agentic_circuit.providers import LLMResult
+from agentic_circuit.rag import MemoryHit
 
 ROUTE = {"value": "fast"}
 CONVERSATION = [
@@ -27,8 +29,7 @@ class RecordingClient:
 
     async def acomplete(self, messages, model_cfg, tools=None):
         self.calls.append((messages, model_cfg))
-        system = messages[0]["content"]
-        function = current_function(system)
+        function = current_function(messages[0]["content"])
         if "функцию выбора глубины" in function:
             return LLMResult(content=ROUTE["value"], model=model_cfg.model)
         if "единственный внешний ответ" in function:
@@ -65,8 +66,15 @@ class RecordingMemory:
 
     async def ensure_collection(self): ...
 
-    async def retrieve(self, query, *, scope, top_k=5, use_rerank=True):
-        self.retrievals.append({"query": query, "scope": scope})
+    async def retrieve(self, query, *, scope, project_id="", conversation_id="", top_k=5, use_rerank=True):
+        self.retrievals.append(
+            {
+                "query": query,
+                "scope": scope,
+                "project_id": project_id,
+                "conversation_id": conversation_id,
+            }
+        )
         return []
 
     async def upsert(self, text, *, scope, **metadata):
@@ -76,37 +84,79 @@ class RecordingMemory:
     async def aclose(self): ...
 
 
-class FakeComposite:
+class FakeComposite(RecordingMemory):
     def __init__(self):
-        self.retrievals = []
+        super().__init__()
+        self.hit = MemoryHit(
+            doc_id="preference-1",
+            text="Олег предпочитает короткие сообщения",
+            score=0.9,
+            collection="memory",
+            scope="user:test",
+            memory_type="user_preference",
+            canonical_key="user.preference.message_length",
+            source="user_explicit",
+            project_id="project:test",
+        )
 
-    async def ensure_collection(self): ...
+    async def retrieve(self, query, *, scope, project_id="", conversation_id="", top_k=5, use_rerank=True):
+        await super().retrieve(
+            query,
+            scope=scope,
+            project_id=project_id,
+            conversation_id=conversation_id,
+            top_k=top_k,
+            use_rerank=use_rerank,
+        )
+        return [self.hit]
 
-    async def retrieve(self, query, *, scope, top_k=5, use_rerank=True):
-        self.retrievals.append({"query": query, "scope": scope})
-        return []
+
+class FakeMemoryManager:
+    def __init__(self):
+        self.selections = []
+        self.extractions = []
+
+    async def select(self, query, candidates, *, project_id="", top_k=6):
+        self.selections.append((query, candidates, project_id, top_k))
+        return candidates[:1]
+
+    async def extract(self, conversation, answer, *, project_id="", existing=None):
+        self.extractions.append((conversation, answer, project_id, existing))
+        return [
+            MemoryCandidate(
+                memory_type="user_fact",
+                canonical_key="user.identity.name",
+                content="Пользователя зовут Олег",
+                source="user_explicit",
+                confidence=0.99,
+                importance=0.8,
+            )
+        ]
 
 
 @pytest.fixture
 def ctx():
     cfg = CircuitConfig.from_disk()
     client = RecordingClient()
-    memories = {circuit: RecordingMemory() for circuit in cfg.circuit_collections}
-    conversation_memory = RecordingMemory()
+    legacy = {circuit: RecordingMemory() for circuit in cfg.circuit_collections}
+    structured = RecordingMemory()
     synthesis_memory = FakeComposite()
+    memory_manager = FakeMemoryManager()
     context = EngineContext(
         config=cfg,
         clients=FakeRegistry(client),
         embeddings=None,
         rerank=None,
         web=None,
-        memories=memories,
-        conversation_memory=conversation_memory,
+        memories=legacy,
+        structured_memory=structured,
         synthesis_memory=synthesis_memory,
+        memory_manager=memory_manager,
     )
     context._client = client
-    context._conversation_memory = conversation_memory
+    context._structured_memory = structured
     context._synthesis_memory = synthesis_memory
+    context._memory_manager = memory_manager
     return context
 
 
@@ -122,40 +172,47 @@ def initial_state():
         "conversation": CONVERSATION,
         "prism": "joy",
         "memory_scope": "user:test",
+        "workspace_id": "workspace:test",
+        "project_id": "project:test",
+        "conversation_id": "conversation:test",
     }
 
 
-async def test_fast_path_goes_straight_to_synthesis_and_saves_final_answer(ctx):
+async def test_fast_path_selects_recall_and_stores_only_gate_output(ctx):
     result = await build_graph(ctx).ainvoke(initial_state())
     assert result["route"] == "fast"
     assert result["synthesis_output"] == "SYNTH"
     assert result.get("circuit_phase1", {}) == {}
-    assert ctx._conversation_memory.upserts == [
+    assert len(ctx._memory_manager.selections) == 1
+    assert ctx._structured_memory.upserts == [
         {
-            "text": "SYNTH",
+            "text": "Пользователя зовут Олег",
             "scope": "user:test",
-            "kind": "assistant_answer",
-            "source": "synthesis",
+            "kind": "user_fact",
+            "memory_type": "user_fact",
+            "canonical_key": "user.identity.name",
+            "source": "user_explicit",
             "query": "Как меня зовут?",
             "prism": "joy",
+            "project_id": "project:test",
+            "conversation_id": "conversation:test",
+            "confidence": 0.99,
+            "importance": 0.8,
+            "ttl_days": None,
         }
     ]
 
 
-async def test_slow_path_runs_all_circuits_and_saves_only_refined_outputs(ctx):
+async def test_slow_path_runs_all_circuits_without_persisting_internal_thoughts(ctx):
     ROUTE["value"] = "slow"
     result = await build_graph(ctx).ainvoke(initial_state())
     assert set(result["circuit_phase1"]) == {"creative", "pragmatic", "effective"}
     assert set(result["circuit_phase2"]) == {"creative", "pragmatic", "effective"}
-    for circuit, memory in ctx.memories.items():
-        assert len(memory.upserts) == 1
-        saved = memory.upserts[0]
-        assert saved["text"] == f"P2::{circuit}"
-        assert saved["kind"] == "refined_perspective"
-        assert saved["scope"] == "user:test"
+    assert all(not memory.upserts for memory in ctx.memories.values())
+    assert len(ctx._structured_memory.upserts) == 1
 
 
-async def test_history_prism_and_scope_reach_circuit(ctx):
+async def test_selected_memory_reaches_every_circuit_with_project_scope(ctx):
     ROUTE["value"] = "slow"
     await build_graph(ctx).ainvoke(initial_state())
     circuit_calls = [
@@ -165,9 +222,11 @@ async def test_history_prism_and_scope_reach_circuit(ctx):
     ]
     assert circuit_calls
     combined = "\n".join(message["content"] for message in circuit_calls[0])
-    assert "Меня зовут Олег" in combined
-    assert "Активная эмоциональная призма: joy" in circuit_calls[0][0]["content"]
-    assert ctx.memories["creative"].retrievals[0]["scope"] == "user:test"
+    assert "Олег предпочитает короткие сообщения" in combined
+    recall = ctx._synthesis_memory.retrievals[0]
+    assert recall["scope"] == "user:test"
+    assert recall["project_id"] == "project:test"
+    assert recall["conversation_id"] == "conversation:test"
 
 
 async def test_circuit_isolation_phase2_sees_only_own_phase1(ctx):

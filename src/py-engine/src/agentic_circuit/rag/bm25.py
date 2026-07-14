@@ -36,6 +36,11 @@ class BM25Index:
         if changed:
             self._rebuild()
 
+    def remove(self, doc_id: str) -> None:
+        if doc_id in self._documents:
+            del self._documents[doc_id]
+            self._rebuild()
+
     def clear(self) -> None:
         self._documents.clear()
         self._rebuild()
