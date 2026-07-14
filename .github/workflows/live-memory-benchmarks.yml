@@ -25,7 +25,8 @@ permissions:
 
 concurrency:
   group: live-memory-benchmarks
-  cancel-in-progress: true
+  # Serialize expensive runs, but never cancel one that is already producing metrics.
+  cancel-in-progress: false
 
 jobs:
   cadence:
@@ -80,9 +81,9 @@ jobs:
       BENCH_STRICT_SAFETY: "false"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -104,7 +105,7 @@ jobs:
           [ -n "${DATABASE_URL:-}" ] && echo "::add-mask::$DATABASE_URL"
 
       - name: Restore benchmark and model caches
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .cache/benchmark-data
