@@ -1,0 +1,43 @@
+[
+  {
+    "name": "global user fact",
+    "query": "как меня зовут",
+    "scope": "user:test",
+    "expected_ids": ["name"],
+    "forbidden_ids": ["other-user"],
+    "top_k": 1
+  },
+  {
+    "name": "project decision isolation",
+    "query": "какую базу данных выбрали",
+    "scope": "user:test",
+    "project_id": "project:a",
+    "expected_ids": ["neon"],
+    "forbidden_ids": ["supabase-old", "project-b-db"],
+    "top_k": 1
+  },
+  {
+    "name": "negative preference",
+    "query": "что не использовать в тексте для HR",
+    "scope": "user:test",
+    "expected_ids": ["no-long-dashes"],
+    "top_k": 1
+  },
+  {
+    "name": "temporary context same conversation",
+    "query": "какой временный код",
+    "scope": "user:test",
+    "conversation_id": "conversation:a",
+    "expected_ids": ["temporary-code"],
+    "top_k": 1
+  },
+  {
+    "name": "temporary context other conversation",
+    "query": "какой временный код",
+    "scope": "user:test",
+    "conversation_id": "conversation:b",
+    "expected_ids": [],
+    "forbidden_ids": ["temporary-code"],
+    "top_k": 1
+  }
+]
