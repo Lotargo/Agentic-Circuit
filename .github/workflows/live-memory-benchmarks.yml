@@ -59,6 +59,8 @@ jobs:
     timeout-minutes: 90
     env:
       OPENCODE_ZEN_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+      DATABASE_DIRECT_URL: ${{ secrets.DATABASE_DIRECT_URL }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
       CONFIG_DIR: ${{ github.workspace }}/config
       QDRANT_URL: http://127.0.0.1:6633
       EMBEDDING_SIDECAR_URL: http://127.0.0.1:8899
@@ -72,6 +74,7 @@ jobs:
       BENCH_LOCOMO_CASES: ${{ inputs.locomo_cases || '8' }}
       BENCH_SEED: ${{ inputs.seed || '20260714' }}
       BENCH_JUDGE_MODEL: mimo-v2.5-free
+      BENCH_REGISTRY_CATEGORY: live-memory-adapted-v1
       # External scores and live extraction cases are informational until a baseline
       # exists. A separate deterministic checker below still blocks leakage regressions.
       BENCH_STRICT_SAFETY: "false"
@@ -84,13 +87,21 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Verify OpenCode secret
+      - name: Verify required secrets
+        shell: bash
         run: |
           test -n "$OPENCODE_ZEN_API_KEY" || {
             echo "OPENCODE_ZEN_API_KEY is not configured in GitHub Actions secrets"
             exit 1
           }
+          database_url="${DATABASE_DIRECT_URL:-${DATABASE_URL:-}}"
+          test -n "$database_url" || {
+            echo "DATABASE_DIRECT_URL or DATABASE_URL is not configured in GitHub Actions secrets"
+            exit 1
+          }
           echo "::add-mask::$OPENCODE_ZEN_API_KEY"
+          [ -n "${DATABASE_DIRECT_URL:-}" ] && echo "::add-mask::$DATABASE_DIRECT_URL"
+          [ -n "${DATABASE_URL:-}" ] && echo "::add-mask::$DATABASE_URL"
 
       - name: Restore benchmark and model caches
         uses: actions/cache@v4
@@ -184,6 +195,22 @@ jobs:
 
       - name: Enforce deterministic memory safety
         run: python scripts/check_live_benchmark.py benchmark-results/live/benchmark-results.json
+
+      - name: Persist benchmark metrics to Neon
+        timeout-minutes: 5
+        working-directory: src/py-engine
+        run: |
+          uv run --with 'psycopg[binary]>=3.2,<4' \
+            python -m agentic_circuit.benchmarks.postgres_registry \
+            --result "$GITHUB_WORKSPACE/benchmark-results/live/benchmark-results.json" \
+            --report "$GITHUB_WORKSPACE/benchmark-results/live/benchmark-report.md" \
+            --category "$BENCH_REGISTRY_CATEGORY" \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --workflow-run-number "$GITHUB_RUN_NUMBER" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --git-ref "$GITHUB_REF"
 
       - name: Publish job summary
         if: always()
