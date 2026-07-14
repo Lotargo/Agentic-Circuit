@@ -25,7 +25,7 @@ Repository:
 Lotargo/chat-openwebui
 ```
 
-Working branch:
+Current pre-merge working branch:
 
 ```text
 agent/experiment-a-deepseek-provider
@@ -37,7 +37,11 @@ Open draft pull request:
 PR #17: Add provider telemetry and OpenCode protocol diagnostics
 ```
 
-Do not assume the PR is merged. Continue on the branch unless the user explicitly chooses another branch.
+Do not assume the PR is merged. Check the repository state first.
+
+If PR #17 has not yet been merged and its checks are green, the preferred next repository operation is a squash merge into `main`. The branch contains a completed, validated stage: Experiment A telemetry, its conclusions, protocol diagnostics and this local-development handoff.
+
+After that merge, do not continue new experiments directly in the old branch. Update local `main` and create a new experiment branch from the current stable baseline.
 
 Read these files before changing code:
 
@@ -55,7 +59,58 @@ config/agents/memory.yaml
 config/agents/synthesis.yaml
 ```
 
-## Current decision
+## Branch and merge policy
+
+`main` is the stable, best-known validated baseline. It is not the branch for interactive model experiments.
+
+Use this cycle:
+
+```text
+validated main
+    -> new isolated experiment branch
+    -> local probe and tests
+    -> fixed benchmark comparison
+    -> select the best evidenced result
+    -> merge that result into main
+    -> create the next experiment branch from updated main
+```
+
+### Rules
+
+1. Create each new model, provider, prompt, parser or benchmark hypothesis in a separate branch created from the latest `main`.
+2. Keep one branch focused on one hypothesis or one coherent comparison. Do not mix provider migration, retrieval changes, selector fallback and fusion experiments in the same branch.
+3. Run exploratory work locally first. CI is the final regression check, not the primary debugger.
+4. Compare experimental branches against the same current `main` baseline using fixed datasets, case counts, seed and unchanged unrelated subsystems.
+5. When several branches test competing approaches, do not merge all of them. Select the best result using reliability, correctness, safety, latency, implementation complexity and reproducibility.
+6. Merge only the best successfully validated result into `main` after its acceptance criteria and normal CI pass.
+7. Prefer squash merge for branches containing many diagnostic or temporary commits, so `main` receives one clear baseline-changing commit.
+8. Failed or inferior experiments remain unmerged. Preserve their findings in documentation or benchmark artifacts, then archive or delete the branch when it is no longer useful.
+9. After every successful merge, update local `main` before starting the next experiment. New branches must inherit the latest accepted improvements rather than an older experimental state.
+10. Update this handoff and the benchmark handoff whenever the accepted baseline, model chain, metrics or next experiment changes.
+
+Suggested local commands after a successful merge:
+
+```bash
+git switch main
+git pull origin main
+git switch -c dev/local-provider-debug
+```
+
+For later isolated comparisons, use descriptive branch names such as:
+
+```text
+experiment/provider-<model-name>
+experiment/judge-token-budget
+experiment/provider-response-parser
+experiment/selector-stabilization
+experiment/fusion-rsf
+```
+
+The important principle is:
+
+> Experimental branches may continue indefinitely, but `main` should advance only when one result is demonstrably better than the current baseline.
+
+## Current development decision
 
 Development now becomes local-first.
 
@@ -204,13 +259,13 @@ uv sync --frozen --extra test
 
 Set the provider key in the local shell or `.env`. Never commit the key.
 
-Example for bash/WSL:
+Bash or WSL:
 
 ```bash
 export OPENCODE_ZEN_API_KEY='...'
 ```
 
-Example for PowerShell:
+PowerShell:
 
 ```powershell
 $env:OPENCODE_ZEN_API_KEY='...'
@@ -220,7 +275,7 @@ The local probe must read credentials only from environment variables.
 
 ## Local-first investigation order
 
-Follow this order. Do not begin with the full LongMemEval/LoCoMo workflow.
+Follow this order. Do not begin with the full LongMemEval or LoCoMo workflow.
 
 ```text
 1. Raw HTTP request
@@ -230,6 +285,8 @@ Follow this order. Do not begin with the full LongMemEval/LoCoMo workflow.
 5. Small memory benchmark subset
 6. Full fixed benchmark subset
 7. CI regression validation
+8. Merge the best validated result into main
+9. Start the next experiment from updated main
 ```
 
 Each stage must explain the failure before the next layer is introduced.
@@ -274,7 +331,7 @@ For each request, record a redacted JSON result containing:
 - completion tokens;
 - total tokens;
 - exception type and redacted message;
-- classification described below.
+- outcome classification.
 
 Do not store API keys, authorization headers, private conversations or full reasoning traces.
 
@@ -288,13 +345,11 @@ Add the directory to `.gitignore` if needed.
 
 ## Phase 2: test two prompt classes
 
-Every candidate model must receive the same two prompt classes.
+Every candidate model must receive the same prompt classes.
 
 ### Minimal deterministic prompt
 
 Purpose: verify basic visible completion and JSON capability without project prompts.
-
-Example:
 
 ```text
 Return JSON only: {"ok":true}
@@ -308,7 +363,7 @@ Use the same semantic-judge prompt structure used by:
 src/py-engine/src/agentic_circuit/benchmarks/live.py
 ```
 
-Use a fixed simple question/reference/candidate trio whose correct result is obvious.
+Use a fixed simple question, reference and candidate trio whose correct result is obvious.
 
 Run both prompt classes at no less than:
 
@@ -366,14 +421,14 @@ For the same model, prompt and token allowance, compare:
 
 Interpretation:
 
-- raw fails and SDK fails: likely provider/model/request issue;
+- raw fails and SDK fails: likely provider, model or request issue;
 - raw succeeds but SDK loses fields: SDK compatibility issue;
 - SDK succeeds but project client fails: project wrapper issue;
-- only 80 tokens fail while 256/1024 succeed: output-budget issue;
-- all token budgets return empty content with valid choices: provider/model behavior or unsupported response field;
-- requested and reported model IDs differ: record alias/router evidence but do not guess hidden weights.
+- only 80 tokens fail while 256 or 1024 succeed: output-budget issue;
+- all token budgets return empty content with valid choices: provider or model behavior, or an unsupported response field;
+- requested and reported model IDs differ: record alias or router evidence, but do not guess hidden weights.
 
-## Phase 5: improve the project provider client only after evidence
+## Phase 5: improve the provider client only after evidence
 
 Do not patch the client based only on speculation.
 
@@ -469,7 +524,7 @@ The first local benchmark is for plumbing and diagnostics, not model ranking.
 
 Do not write exploratory local runs to the comparable Neon category by default. Save them locally or use a separate development category.
 
-## Phase 9: resume the fixed benchmark and Experiment B
+## Phase 9: fixed comparison and Experiment B
 
 Only after the local provider chain is stable, run the fixed comparison:
 
@@ -495,9 +550,23 @@ Then continue Experiment B from `docs/MEMORY_BENCHMARK_HANDOFF.md`:
 
 Experiment B must not silently change retrieval, selector, reader and provider at the same time.
 
-## Acceptance criteria before changing production defaults
+## Phase 10: select and merge the accepted result
 
-A provider/model chain can replace the current defaults only when all of the following are true:
+After one or more experiment branches complete the same comparison:
+
+1. Compare them against the current `main` baseline and against each other.
+2. Reject branches with unexplained provider failures, safety regressions or unreliable structured output.
+3. Prefer the result with the strongest reproducible balance of correctness, reliability, latency and maintainability. A marginal metric gain does not justify a fragile or much more complex implementation.
+4. Run normal CI on the selected branch.
+5. Update the experiment documentation and handoff with the decision and supporting measurements.
+6. Merge only the selected result into `main`.
+7. Pull the updated `main` locally and create separate branches for all later experiments.
+
+This process may repeat many times. `main` should represent the accumulated best validated state, while separate branches remain the workspace for further alternatives.
+
+## Acceptance criteria before changing the main baseline
+
+A provider or model chain can replace the current defaults only when all of the following are true:
 
 1. Raw HTTP, OpenAI SDK and project client results are understood and consistent.
 2. Empty responses have a specific evidenced classification.
@@ -507,9 +576,11 @@ A provider/model chain can replace the current defaults only when all of the fol
 6. Requested and provider-reported model IDs are recorded.
 7. Unit tests cover every discovered compatibility case.
 8. The small local benchmark completes without unexplained provider failures.
-9. The fixed benchmark uses the same seed, cases and retrieval stack as the three stored reference runs.
+9. The fixed benchmark uses the same seed, cases and retrieval stack as the stored reference runs.
 10. All deterministic memory safety checks still pass.
 11. Normal CI passes after the local work is complete.
+12. The candidate is demonstrably better than, or fixes a confirmed defect in, the current `main` baseline.
+13. The experiment report explains why this branch was selected over competing branches.
 
 ## Do not do yet
 
@@ -517,7 +588,7 @@ Do not:
 
 - blame LangGraph for the Experiment A empty judge results;
 - switch all agent manifests to new models before local protocol testing;
-- add Qwen/Anthropic transport in the current task;
+- add Qwen or Anthropic transport in the current task;
 - implement cross-protocol fallback;
 - change embeddings, Qdrant, reranker or RRF;
 - start RRF versus RSF work;
@@ -525,13 +596,15 @@ Do not:
 - treat Token F1 as semantic correctness;
 - publish local exploratory runs as official benchmark results;
 - commit provider keys or raw private prompts;
-- use CI as the main interactive debugger.
+- use CI as the main interactive debugger;
+- conduct unrelated experiments directly in `main`;
+- merge several competing experimental branches merely because each one passes CI.
 
 ## Expected deliverables from the next assistant
 
 The next assistant should produce, in order:
 
-1. A configurable local OpenAI-compatible raw/SDK/project-client probe.
+1. A configurable local OpenAI-compatible raw, SDK and project-client probe.
 2. A redacted local report comparing token budgets and response shapes.
 3. A root-cause conclusion supported by captured metadata.
 4. Provider-client fixes only where the report demonstrates a need.
@@ -539,14 +612,20 @@ The next assistant should produce, in order:
 6. A provider-role matrix for candidate models.
 7. A small local benchmark run.
 8. A recommendation for primary, fallback and judge models.
-9. Only then, the full fixed benchmark and Experiment B metrics.
+9. The full fixed benchmark and Experiment B metrics.
+10. A documented comparison with the current `main` baseline.
+11. A PR containing only the best validated result chosen for the next `main` baseline.
 
 ## Instruction to the next AI assistant
 
-Start by checking out `agent/experiment-a-deepseek-provider`, reading this file and inspecting the current provider client and probe script.
+First inspect whether PR #17 is already merged.
+
+If it is not merged and all checks remain green, finish the current stage by merging it into `main` according to the user's decision. Then update local `main` and create a new isolated branch for local provider debugging.
 
 Do not begin with GitHub Actions and do not change model defaults immediately.
 
 First make one simple OpenAI-compatible model request locally through raw HTTP, the OpenAI SDK and the project client. Capture the response shape, token usage and finish reason without storing secrets or hidden reasoning. Then reproduce the benchmark judge prompt at 80, 256 and 1024 output tokens.
 
 Report the first proven divergence between the three layers before modifying production code.
+
+After successful experiments, compare all viable branches using the same fixed protocol. Merge only the best proven result into `main`, then continue future experiments from separate branches created from that updated baseline.
