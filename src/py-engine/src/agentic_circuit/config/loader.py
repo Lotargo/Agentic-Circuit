@@ -81,18 +81,6 @@ def load_all_agents(agents_dir: Optional[Path] = None) -> dict[str, AgentConfig]
     return agents
 
 
-def load_manifest(agent_name: str, manifest_file: str) -> str:
-    """Load a legacy per-agent manifest.
-
-    Runtime persona assembly uses the shared prism files. This helper remains for
-    migration tooling and for inspecting older configurations.
-    """
-    path = MANIFESTS_DIR / agent_name / manifest_file
-    if not path.exists():
-        raise FileNotFoundError(f"Manifest not found: {path}")
-    return path.read_text(encoding="utf-8")
-
-
 def load_personality_core() -> str:
     if not PERSONALITY_CORE_PATH.exists():
         raise FileNotFoundError(f"Personality core not found: {PERSONALITY_CORE_PATH}")
@@ -113,11 +101,6 @@ def resolve_prism_manifest(agent: AgentConfig, prism: PrismName | str | None) ->
     if not path.exists():
         raise FileNotFoundError(f"Shared prism manifest not found: {path}")
     return path.read_text(encoding="utf-8")
-
-
-def load_agent_manifests(agent: AgentConfig) -> list[str]:
-    manifest = resolve_prism_manifest(agent, agent.default_prism)
-    return [manifest] if manifest else []
 
 
 def load_meta_instruction(agent: AgentConfig) -> Optional[str]:
