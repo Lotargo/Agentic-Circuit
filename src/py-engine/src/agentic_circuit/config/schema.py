@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ThinkingLevel = Literal["off", "low", "medium", "high"]
 PrismName = Literal[
@@ -42,10 +42,28 @@ class ProvidersFile(BaseModel):
 class ModelConfig(BaseModel):
     provider: str
     model: str
+    fallback_models: list[str] = Field(default_factory=list)
     temperature: float = 0.7
     max_tokens: int = 2048
     top_p: float = 0.9
     thinking_level: ThinkingLevel = "off"
+
+    @field_validator("fallback_models")
+    @classmethod
+    def unique_fallback_models(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("fallback model names must be unique")
+        return values
+
+    @model_validator(mode="after")
+    def validate_model_chain(self) -> "ModelConfig":
+        if self.model in self.fallback_models:
+            raise ValueError("primary model must not be repeated in fallback_models")
+        return self
+
+    @property
+    def model_chain(self) -> list[str]:
+        return [self.model, *self.fallback_models]
 
 
 class ToolsConfig(BaseModel):
