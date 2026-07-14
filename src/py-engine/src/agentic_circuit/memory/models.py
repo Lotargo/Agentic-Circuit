@@ -36,9 +36,8 @@ class MemoryContext:
     conversation_id: str = ""
 
     def __post_init__(self) -> None:
-        # The API hashes raw user and workspace identifiers separately. Fold both
-        # hashes into the final scope so the same account cannot leak memory across
-        # independent workspaces while no original identifier reaches storage.
+        # Fold the opaque workspace namespace into the opaque user namespace so
+        # one account cannot share memory across independent workspaces.
         if self.scope and self.workspace_id:
             material = f"{self.scope}\x1f{self.workspace_id}".encode("utf-8")
             digest = hashlib.sha256(material).hexdigest()
@@ -51,7 +50,8 @@ class MemoryContext:
 
 class MemoryCandidate(BaseModel):
     should_store: bool = True
-    sensitive: bool = False
+    # Fail closed: the policy model must explicitly mark every persisted item safe.
+    sensitive: bool = True
     memory_type: MemoryType
     canonical_key: str = Field(min_length=3, max_length=160)
     content: str = Field(min_length=1, max_length=6000)
