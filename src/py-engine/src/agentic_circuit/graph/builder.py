@@ -1,4 +1,4 @@
-"""LangGraph circuit: router -> parallel perspectives -> streamed synthesis."""
+"""LangGraph circuit with selective recall and structured memory persistence."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send, StreamWriter
 
 from ..config import CircuitConfig
+from ..memory import MemoryManager
 from ..providers import ClientRegistry
 from ..rag import EmbeddingClient, MemoryHit, RerankClient, VectorMemory
 from ..tools import WebSearchTool
@@ -34,6 +35,10 @@ class CircuitState(TypedDict, total=False):
     conversation: list[dict]
     prism: str
     memory_scope: str
+    workspace_id: str
+    project_id: str
+    conversation_id: str
+    memory_contexts: list[MemoryHit]
     route: str
     router_raw: str
     circuit: str
@@ -51,8 +56,9 @@ class EngineContext:
     rerank: Optional[RerankClient] = None
     web: Optional[WebSearchTool] = None
     memories: dict[str, VectorMemory] = field(default_factory=dict)
-    conversation_memory: Optional[VectorMemory] = None
+    structured_memory: Optional[VectorMemory] = None
     synthesis_memory: Optional[object] = None
+    memory_manager: Optional[MemoryManager] = None
 
     async def aclose(self) -> None:
         close = getattr(self.clients, "aclose", None)
@@ -68,14 +74,14 @@ class EngineContext:
         unique: dict[int, VectorMemory] = {
             id(memory): memory for memory in self.memories.values()
         }
-        if self.conversation_memory is not None:
-            unique[id(self.conversation_memory)] = self.conversation_memory
+        if self.structured_memory is not None:
+            unique[id(self.structured_memory)] = self.structured_memory
         for memory in unique.values():
             await memory.aclose()
 
 
 class CompositeMemory:
-    """Retrieve across collections, deduplicate, then rank globally."""
+    """Retrieve across collections, deduplicate and rank globally."""
 
     def __init__(
         self,
@@ -96,18 +102,22 @@ class CompositeMemory:
         query: str,
         *,
         scope: str | None,
+        project_id: str = "",
+        conversation_id: str = "",
         top_k: int = 5,
         use_rerank: bool = True,
     ) -> list[MemoryHit]:
         if not self.memories or not scope or top_k <= 0:
             return []
 
-        per_collection = max(top_k * 2, 4)
+        per_collection = max(top_k * 3, 8)
         batches = await asyncio.gather(
             *(
                 memory.retrieve(
                     query,
                     scope=scope,
+                    project_id=project_id,
+                    conversation_id=conversation_id,
                     top_k=per_collection,
                     use_rerank=False,
                 )
@@ -116,39 +126,40 @@ class CompositeMemory:
             return_exceptions=True,
         )
 
-        valid_batches = [batch for batch in batches if isinstance(batch, list)]
         candidates: list[MemoryHit] = []
         seen: set[tuple[str, str, str]] = set()
-        max_depth = max((len(batch) for batch in valid_batches), default=0)
-        for depth in range(max_depth):
-            for batch in valid_batches:
-                if depth >= len(batch):
-                    continue
-                hit = batch[depth]
-                key = (hit.source, hit.kind, hit.text)
+        for batch in batches:
+            if not isinstance(batch, list):
+                continue
+            for hit in batch:
+                key = (hit.canonical_key or hit.source, hit.memory_type, hit.text)
                 if key in seen:
                     continue
                 seen.add(key)
                 candidates.append(hit)
 
-        candidate_limit = max(top_k * 4, top_k)
+        candidate_limit = max(top_k * 5, 20)
+        candidates.sort(key=lambda item: item.score, reverse=True)
         candidates = candidates[:candidate_limit]
         if use_rerank and self._rerank and candidates:
             try:
                 ranked = await self._rerank.rerank_indices(
                     query,
                     [hit.rerank_text() for hit in candidates],
-                    top_n=top_k,
+                    top_n=candidate_limit,
                 )
-                return [
-                    replace(candidates[index], score=score)
+                candidates = [
+                    replace(
+                        candidates[index],
+                        score=max(0.0, float(score)) * max(candidates[index].score, 1e-6),
+                    )
                     for index, score in ranked
                     if 0 <= index < len(candidates)
                 ]
+                candidates.sort(key=lambda item: item.score, reverse=True)
             except Exception:
                 pass
         return candidates[:top_k]
-
 
 
 def _parse_route(raw: str) -> str:
@@ -159,11 +170,21 @@ async def _safe_retrieve(
     memory,
     query: str,
     scope: str | None,
+    project_id: str,
+    conversation_id: str,
     label: str,
     errors: list[str],
+    *,
+    top_k: int = 12,
 ) -> list[MemoryHit]:
     try:
-        return await memory.retrieve(query, scope=scope)
+        return await memory.retrieve(
+            query,
+            scope=scope,
+            project_id=project_id,
+            conversation_id=conversation_id,
+            top_k=top_k,
+        )
     except Exception as exc:
         errors.append(f"{label}: {type(exc).__name__}: {exc}")
         return []
@@ -200,27 +221,50 @@ def build_graph(ctx: EngineContext):
             update["errors"] = [f"router: {result.error}"]
         return update
 
+    async def memory_recall_node(state: CircuitState) -> dict:
+        errors: list[str] = []
+        scope = state.get("memory_scope")
+        project_id = state.get("project_id", "")
+        conversation_id = state.get("conversation_id", "")
+        candidates = (
+            await _safe_retrieve(
+                ctx.synthesis_memory,
+                state["user_input"],
+                scope,
+                project_id,
+                conversation_id,
+                "memory:retrieve",
+                errors,
+                top_k=16,
+            )
+            if ctx.synthesis_memory
+            else []
+        )
+        selected = candidates[:6]
+        if ctx.memory_manager and candidates:
+            try:
+                selected = await ctx.memory_manager.select(
+                    state["user_input"],
+                    candidates,
+                    project_id=project_id,
+                    top_k=6,
+                )
+            except Exception as exc:
+                errors.append(f"memory:select: {type(exc).__name__}: {exc}")
+        update: dict = {"memory_contexts": selected}
+        if errors:
+            update["errors"] = errors
+        return update
+
     async def circuit_node(state: CircuitState) -> dict:
         circuit = state["circuit"]
         phase1 = ctx.config.get(f"{circuit}-1")
         phase2 = ctx.config.get(f"{circuit}-2")
-        memory = ctx.memories[circuit]
         errors: list[str] = []
         prism = state.get("prism") or "neutral"
-        scope = state.get("memory_scope")
         conversation = state["conversation"]
+        historical = state.get("memory_contexts", [])
 
-        historical = (
-            await _safe_retrieve(
-                memory,
-                state["user_input"],
-                scope,
-                f"{circuit}:rag_retrieve",
-                errors,
-            )
-            if phase1.tools.rag or phase2.tools.rag
-            else []
-        )
         result1 = await ctx.clients.get(phase1.model.provider).acomplete(
             phase1_messages(
                 phase1,
@@ -246,21 +290,8 @@ def build_graph(ctx: EngineContext):
         if result2.error:
             errors.append(f"{circuit}-2: {result2.error}")
 
-        # Persist only the refined perspective. Raw phase-1 output is deliberately
-        # ephemeral so weak ideas do not become long-term self-reinforcing memory.
-        if phase2.tools.rag and result2.content:
-            await _safe_upsert(
-                memory,
-                result2.content,
-                scope,
-                f"{circuit}:rag_upsert",
-                errors,
-                kind="refined_perspective",
-                source=circuit,
-                query=state["user_input"],
-                prism=prism,
-            )
-
+        # Perspective outputs remain ephemeral. The memory manager later extracts
+        # only durable user facts and explicit project decisions from the complete turn.
         update: dict = {
             "circuit_phase1": {circuit: result1.content},
             "circuit_phase2": {circuit: result2.content},
@@ -273,18 +304,10 @@ def build_graph(ctx: EngineContext):
         agent = ctx.config.synthesis
         errors: list[str] = []
         scope = state.get("memory_scope")
+        project_id = state.get("project_id", "")
+        conversation_id = state.get("conversation_id", "")
         prism = state.get("prism") or "neutral"
-        contexts = (
-            await _safe_retrieve(
-                ctx.synthesis_memory,
-                state["user_input"],
-                scope,
-                "synthesis:rag_retrieve",
-                errors,
-            )
-            if ctx.synthesis_memory and agent.tools.rag
-            else []
-        )
+        contexts = state.get("memory_contexts", [])
 
         web_results: list[str] = []
         if agent.tools.web_search and ctx.web:
@@ -330,18 +353,40 @@ def build_graph(ctx: EngineContext):
                 errors.append(f"synthesis: {result.error}")
 
         output = "".join(chunks)
-        if output and ctx.conversation_memory is not None:
-            await _safe_upsert(
-                ctx.conversation_memory,
-                output,
-                scope,
-                "synthesis:rag_upsert",
-                errors,
-                kind="assistant_answer",
-                source="synthesis",
-                query=state["user_input"],
-                prism=prism,
-            )
+        if (
+            output
+            and scope
+            and ctx.structured_memory is not None
+            and ctx.memory_manager is not None
+        ):
+            try:
+                extracted = await ctx.memory_manager.extract(
+                    state["conversation"],
+                    output,
+                    project_id=project_id,
+                    existing=contexts,
+                )
+                for candidate in extracted:
+                    await _safe_upsert(
+                        ctx.structured_memory,
+                        candidate.content,
+                        scope,
+                        "memory:upsert",
+                        errors,
+                        kind=candidate.memory_type,
+                        memory_type=candidate.memory_type,
+                        canonical_key=candidate.canonical_key,
+                        source=candidate.source,
+                        query=state["user_input"],
+                        prism=prism,
+                        project_id=project_id,
+                        conversation_id=conversation_id,
+                        confidence=candidate.confidence,
+                        importance=candidate.importance,
+                        ttl_days=candidate.ttl_days,
+                    )
+            except Exception as exc:
+                errors.append(f"memory:extract: {type(exc).__name__}: {exc}")
 
         update: dict = {"synthesis_output": output}
         if errors:
@@ -359,6 +404,10 @@ def build_graph(ctx: EngineContext):
                         "conversation": state["conversation"],
                         "prism": state.get("prism") or "neutral",
                         "memory_scope": state.get("memory_scope", ""),
+                        "workspace_id": state.get("workspace_id", ""),
+                        "project_id": state.get("project_id", ""),
+                        "conversation_id": state.get("conversation_id", ""),
+                        "memory_contexts": state.get("memory_contexts", []),
                     },
                 )
                 for circuit in circuits
@@ -367,10 +416,12 @@ def build_graph(ctx: EngineContext):
 
     graph = StateGraph(CircuitState)
     graph.add_node("router", router_node)
+    graph.add_node("memory_recall", memory_recall_node)
     graph.add_node("circuit", circuit_node)
     graph.add_node("synthesis", synthesis_node)
     graph.add_edge(START, "router")
-    graph.add_conditional_edges("router", route_decision, {"fast": "synthesis"})
+    graph.add_edge("router", "memory_recall")
+    graph.add_conditional_edges("memory_recall", route_decision, {"fast": "synthesis"})
     graph.add_edge("circuit", "synthesis")
     graph.add_edge("synthesis", END)
     return graph.compile()
