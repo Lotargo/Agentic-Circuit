@@ -28,7 +28,19 @@ jobs:
         run: uv sync --frozen --extra test
       - name: Run pytest
         working-directory: src/py-engine
-        run: uv run --frozen pytest -q
+        run: |
+          set +e
+          uv run --frozen pytest -q --tb=short > ../../pytest-report.txt 2>&1
+          status=$?
+          cat ../../pytest-report.txt
+          exit $status
+      - name: Upload pytest report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report
+          path: pytest-report.txt
+          if-no-files-found: error
 
   typescript:
     name: TypeScript build
