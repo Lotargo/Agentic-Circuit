@@ -27,11 +27,11 @@ class RecordingClient:
             return LLMResult(content="SYNTH", model=model_cfg.model)
         role = (
             "creative"
-            if "креативную перспективу" in system
+            if "креативн" in system
             else "pragmatic"
-            if "прагматичную перспективу" in system
+            if "прагматичн" in system
             else "effective"
-            if "эффективную перспективу" in system
+            if "эффективн" in system
             else "unknown"
         )
         all_content = "\n".join(message["content"] for message in messages)
@@ -153,7 +153,7 @@ async def test_history_prism_and_scope_reach_circuit(ctx):
     circuit_calls = [
         messages
         for messages, _ in ctx._client.calls
-        if "креативную перспективу" in messages[0]["content"]
+        if "креативн" in messages[0]["content"]
     ]
     assert circuit_calls
     combined = "\n".join(message["content"] for message in circuit_calls[0])
@@ -168,7 +168,7 @@ async def test_circuit_isolation_phase2_sees_only_own_phase1(ctx):
     phase2_creative = None
     for messages, _ in ctx._client.calls:
         content = "\n".join(message["content"] for message in messages)
-        if "креативную перспективу" in messages[0]["content"] and "P1::creative" in content:
+        if "креативн" in messages[0]["content"] and "P1::creative" in content:
             phase2_creative = content
     assert phase2_creative is not None
     assert "P1::pragmatic" not in phase2_creative
