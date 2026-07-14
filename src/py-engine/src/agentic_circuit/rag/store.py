@@ -8,6 +8,7 @@ ignored to prevent cross-user context leakage.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -24,6 +25,9 @@ RRF_K = int(os.environ.get("RAG_RRF_K", "60"))
 DENSE_WEIGHT = float(os.environ.get("RAG_DENSE_WEIGHT", "0.6"))
 LEXICAL_WEIGHT = float(os.environ.get("RAG_LEXICAL_WEIGHT", "0.4"))
 MIN_DENSE_SCORE = float(os.environ.get("RAG_MIN_DENSE_SCORE", "0.0"))
+QDRANT_RETRY_SECONDS = float(os.environ.get("QDRANT_RETRY_SECONDS", "30"))
+MAX_MEMORY_CHARS = int(os.environ.get("RAG_MAX_MEMORY_CHARS", "6000"))
+MAX_QUERY_CHARS = int(os.environ.get("RAG_MAX_QUERY_CHARS", "2000"))
 
 
 @dataclass(frozen=True)
@@ -74,10 +78,17 @@ class VectorMemory:
         self._hydrated_scopes: set[str] = set()
         self._qclient = None
         self._qdrant_url = qdrant_url or QDRANT_URL
+        self._qdrant_retry_after = 0.0
+
+    def _mark_qdrant_failure(self) -> None:
+        self._qclient = None
+        self._qdrant_retry_after = time.monotonic() + QDRANT_RETRY_SECONDS
 
     def _ensure_qdrant(self):
         if self._qclient is not None:
             return self._qclient
+        if time.monotonic() < self._qdrant_retry_after:
+            return None
         try:
             from qdrant_client import AsyncQdrantClient
 
@@ -87,7 +98,7 @@ class VectorMemory:
                 timeout=10.0,
             )
         except Exception:
-            self._qclient = None
+            self._mark_qdrant_failure()
         return self._qclient
 
     @staticmethod
@@ -114,7 +125,12 @@ class VectorMemory:
             self._vectors.setdefault(hit.scope, {})[hit.doc_id] = vector
 
     @staticmethod
-    def _point_to_hit(collection: str, point, scope: str, score: float = 0.0) -> MemoryHit | None:
+    def _point_to_hit(
+        collection: str,
+        point,
+        scope: str,
+        score: float = 0.0,
+    ) -> MemoryHit | None:
         payload = point.payload or {}
         if not isinstance(payload, dict):
             return None
@@ -124,13 +140,13 @@ class VectorMemory:
             return None
         return MemoryHit(
             doc_id=str(point.id),
-            text=text,
+            text=text[:MAX_MEMORY_CHARS],
             score=score,
             collection=collection,
             scope=scope,
             kind=str(payload.get("kind") or "memory"),
             source=str(payload.get("source") or collection),
-            query=str(payload.get("query") or ""),
+            query=str(payload.get("query") or "")[:MAX_QUERY_CHARS],
             prism=str(payload.get("prism") or "neutral"),
             created_at=str(payload.get("created_at") or ""),
         )
@@ -160,7 +176,7 @@ class VectorMemory:
                 # Existing indexes and older Qdrant versions are both harmless.
                 pass
         except Exception:
-            self._qclient = None
+            self._mark_qdrant_failure()
 
     async def _ensure_scope_loaded(self, scope: str) -> None:
         if not scope or scope in self._hydrated_scopes:
@@ -187,7 +203,7 @@ class VectorMemory:
                 if offset is None:
                     break
         except Exception:
-            self._qclient = None
+            self._mark_qdrant_failure()
             return
 
         records = self._records.setdefault(scope, {})
@@ -208,7 +224,8 @@ class VectorMemory:
         prism: str = "neutral",
         doc_id: Optional[str] = None,
     ) -> str:
-        text = text.strip()
+        text = text.strip()[:MAX_MEMORY_CHARS]
+        query = query.strip()[:MAX_QUERY_CHARS]
         if not scope or not text:
             return ""
 
@@ -217,16 +234,6 @@ class VectorMemory:
             [self.collection, scope, kind, source, query, prism, text]
         )
         doc_id = doc_id or str(uuid.uuid5(uuid.NAMESPACE_URL, fingerprint))
-        embedding_text = f"Запрос: {query}\nВывод: {text}" if query else text
-        vector = (
-            await self._embed.embed([embedding_text], input_type="passage")
-        )[0]
-        if len(vector) != self._vector_size:
-            raise ValueError(
-                f"embedding dimension {len(vector)} does not match "
-                f"EMBEDDING_VECTOR_SIZE={self._vector_size}"
-            )
-
         hit = MemoryHit(
             doc_id=doc_id,
             text=text,
@@ -239,8 +246,23 @@ class VectorMemory:
             prism=prism,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        self._remember(hit, vector)
+        embedding_text = hit.rerank_text()
+        try:
+            vector = (
+                await self._embed.embed([embedding_text], input_type="passage")
+            )[0]
+            if len(vector) != self._vector_size:
+                raise ValueError(
+                    f"embedding dimension {len(vector)} does not match "
+                    f"EMBEDDING_VECTOR_SIZE={self._vector_size}"
+                )
+        except Exception:
+            # Keep a process-local lexical memory even when dense persistence is
+            # unavailable; the caller still receives the error for observability.
+            self._remember(hit)
+            raise
 
+        self._remember(hit, vector)
         client = self._ensure_qdrant()
         if client is not None:
             try:
@@ -265,7 +287,7 @@ class VectorMemory:
                     ],
                 )
             except Exception:
-                self._qclient = None
+                self._mark_qdrant_failure()
         return doc_id
 
     async def _dense_search(
@@ -298,13 +320,18 @@ class VectorMemory:
                     score = float(point.score or 0.0)
                     if score < MIN_DENSE_SCORE:
                         continue
-                    hit = self._point_to_hit(self.collection, point, scope, score)
+                    hit = self._point_to_hit(
+                        self.collection,
+                        point,
+                        scope,
+                        score,
+                    )
                     if hit is not None:
                         self._remember(hit)
                         hits.append(hit)
                 return hits
             except Exception:
-                self._qclient = None
+                self._mark_qdrant_failure()
 
         local = []
         for doc_id, vector in self._vectors.get(scope, {}).items():
@@ -322,12 +349,18 @@ class VectorMemory:
         top_k: int = 5,
         use_rerank: bool = True,
     ) -> list[MemoryHit]:
-        if not scope or not query.strip() or top_k <= 0:
+        query = query.strip()[:MAX_QUERY_CHARS]
+        if not scope or not query or top_k <= 0:
             return []
         await self._ensure_scope_loaded(scope)
 
         candidate_limit = max(top_k * 3, top_k)
-        dense = await self._dense_search(query, scope, candidate_limit)
+        try:
+            dense = await self._dense_search(query, scope, candidate_limit)
+        except Exception:
+            # Dense embeddings are optional for availability. BM25 still works on
+            # payloads already loaded from Qdrant or current-process writes.
+            dense = []
         lexical = self._bm25.get(scope, BM25Index()).search(
             query,
             candidate_limit,
@@ -352,8 +385,7 @@ class VectorMemory:
                 reverse=True,
             )
             if doc_id in records
-        ]
-        candidates = candidates[:candidate_limit]
+        ][:candidate_limit]
 
         if use_rerank and self._rerank and candidates:
             try:
@@ -374,6 +406,7 @@ class VectorMemory:
     async def aclose(self) -> None:
         client = self._qclient
         self._qclient = None
+        self._qdrant_retry_after = 0.0
         if client is not None:
             close = getattr(client, "close", None)
             if close is not None:
