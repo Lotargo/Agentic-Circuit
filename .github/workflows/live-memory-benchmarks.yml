@@ -74,7 +74,8 @@ jobs:
       BENCH_LONGMEMEVAL_CASES: ${{ inputs.longmemeval_cases || '6' }}
       BENCH_LOCOMO_CASES: ${{ inputs.locomo_cases || '8' }}
       BENCH_SEED: ${{ inputs.seed || '20260714' }}
-      BENCH_JUDGE_MODEL: mimo-v2.5-free
+      BENCH_FALLBACK_MODEL: deepseek-v4-flash-free
+      BENCH_JUDGE_MODEL: deepseek-v4-flash-free
       BENCH_REGISTRY_CATEGORY: live-memory-adapted-v1
       # External scores and live extraction cases are informational until a baseline
       # exists. A separate deterministic checker below still blocks leakage regressions.
@@ -103,6 +104,34 @@ jobs:
           echo "::add-mask::$OPENCODE_ZEN_API_KEY"
           [ -n "${DATABASE_DIRECT_URL:-}" ] && echo "::add-mask::$DATABASE_DIRECT_URL"
           [ -n "${DATABASE_URL:-}" ] && echo "::add-mask::$DATABASE_URL"
+
+      - name: Configure Experiment A provider chain
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          fallback = os.environ["BENCH_FALLBACK_MODEL"]
+          old = "    - mimo-v2.5-free"
+          new = f"    - {fallback}"
+          targets = [
+              Path("config/agents/memory.yaml"),
+              Path("config/agents/synthesis.yaml"),
+          ]
+          for path in targets:
+              text = path.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise RuntimeError(
+                      f"expected exactly one MiMo fallback in {path}, found {text.count(old)}"
+                  )
+              path.write_text(text.replace(old, new), encoding="utf-8")
+              print(f"{path}: big-pickle -> {fallback}")
+
+          providers = Path("config/providers.yaml").read_text(encoding="utf-8")
+          if f"      - {fallback}" not in providers:
+              raise RuntimeError(f"benchmark fallback model is not declared: {fallback}")
+          PY
 
       - name: Restore benchmark and model caches
         uses: actions/cache@v6
