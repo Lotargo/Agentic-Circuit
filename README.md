@@ -150,6 +150,51 @@ Persistent memory включается только при стабильном 
 
 Текущий CI требует 100% на небольшом защитном наборе. Это regression barrier, а не замена полноценному измерению на реальных диалогах.
 
+## Live memory benchmarks
+
+Отдельный workflow `.github/workflows/live-memory-benchmarks.yml` запускается вручную и раз в 72 часа. GitHub cron вызывается ежедневно, но дешёвый cadence gate разрешает тяжёлый job только каждый третий UTC-день от фиксированной даты.
+
+Он использует `OPENCODE_ZEN_API_KEY` из GitHub Actions Secrets и прогоняет три независимых направления проверки:
+
+1. **LongMemEval-S cleaned, adapted subset** — сбалансированная фиксированная подвыборка по типам долговременного запоминания и abstention;
+2. **LoCoMo-10 QA, adapted subset** — фиксированная подвыборка вопросов из длинных многосессионных бесед;
+3. **Internal memory lifecycle and isolation** — project/conversation isolation, supersession, unknown abstention и живые проверки memory extraction/update.
+
+Внешние наборы индексируются через тот же production retrieval stack: multilingual E5, Qdrant, BM25, RRF, cross-encoder rerank и `MEMORY_SELECT`. Затем ответ формирует основной reader. Измеряются:
+
+- token F1;
+- semantic judge accuracy;
+- Recall@10;
+- MRR@10;
+- unsupported-context rate;
+- latency;
+- ошибки и фактические срабатывания fallback.
+
+Результат публикуется в GitHub Job Summary и сохраняется на 90 дней как `benchmark-results.json` и `benchmark-report.md`. Отчёт всегда называет результаты **adapted subset**, а не официальным полным leaderboard score. Seed, размеры подвыборок, commit SHA, model chain и provider telemetry входят в JSON.
+
+Регулярный профиль намеренно небольшой: 6 LongMemEval-кейсов, 8 LoCoMo-вопросов и 6 внутренних сценариев. Это ограничивает время CPU-runner и расход API. При ручном запуске размеры можно увеличить через workflow inputs.
+
+Пока собирается baseline, внешние quality scores и LLM-зависимые extraction-кейсы информационные. Workflow жёстко падает только при детерминированных регрессиях:
+
+- межпроектное подмешивание;
+- междиалоговая утечка temporary context;
+- возврат superseded решения;
+- появление памяти там, где сведений нет.
+
+Для live benchmark используются только публичные датасеты и синтетические внутренние кейсы. Приватные пользовательские диалоги в бесплатные модели не отправляются.
+
+## Модели и fallback
+
+Все роли используют одну упорядоченную цепочку:
+
+```text
+big-pickle -> mimo-v2.5-free
+```
+
+Если primary request завершается ошибкой или пустым ответом, клиент пробует MiMo. Если модель не принимает расширенный `thinking` payload, сначала повторяется запрос к той же модели с обычными OpenAI-compatible параметрами. В SSE fallback разрешён только до первого выданного токена, чтобы не дублировать уже начатый ответ.
+
+Benchmark report отдельно показывает количество запросов, ошибок, успешных fallback на другую модель и повторов без provider-specific параметров.
+
 ## Локальный запуск
 
 ```bash
@@ -193,15 +238,16 @@ npm run dev
 
 ## CI
 
-GitHub Actions проверяет:
+Обычный CI без внешних секретов проверяет:
 
 - frozen Python lock и pytest;
 - persona/prompts и memory-manager JSON contracts;
 - user/project/conversation isolation;
 - TTL, supersession, deterministic upsert и BM25 fallback;
 - RAG quality metrics и forbidden-memory rate;
+- model/parameter fallback semantics;
 - TypeScript typecheck/build;
 - Compose и обе Docker-сборки;
 - HTTP smoke flow mock provider → Python engine → TS gateway.
 
-Полный тяжёлый запуск Qdrant + TEI + OpenWebUI с загрузкой реальных моделей остаётся локальной эксплуатационной проверкой.
+Тяжёлый live workflow отдельно поднимает настоящий Qdrant и оба TEI sidecar, использует GitHub Secret и сохраняет воспроизводимый отчёт по трём benchmark suites.
