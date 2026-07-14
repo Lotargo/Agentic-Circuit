@@ -12,6 +12,14 @@ class FakeEmbeddingClient:
         return [[1.0, 0.0] for _ in texts]
 
 
+class FailingQueryEmbeddingClient(FakeEmbeddingClient):
+    async def embed(self, texts, *, input_type="passage"):
+        self.input_types.append(input_type)
+        if input_type == "query":
+            raise RuntimeError("embedding sidecar unavailable")
+        return [[1.0, 0.0] for _ in texts]
+
+
 class FakeQdrantClient:
     def __init__(self, points=None):
         self.points = list(points or [])
@@ -141,6 +149,23 @@ async def test_scope_hydration_builds_bm25_and_ignores_zero_match_documents():
     assert result[0].doc_id == "rare"
     lexical = memory._bm25["scope-a"].search("несуществующийтермин", 10)
     assert lexical == []
+
+
+async def test_embedding_failure_still_returns_hydrated_bm25_result():
+    embeddings = FailingQueryEmbeddingClient()
+    memory = VectorMemory("creative", embeddings, vector_size=2)
+    memory._qclient = FakeQdrantClient(
+        [point("rare", "scope-a", "старое редкое слово")]
+    )
+
+    result = await memory.retrieve(
+        "редкое",
+        scope="scope-a",
+        use_rerank=False,
+    )
+
+    assert [hit.doc_id for hit in result] == ["rare"]
+    assert embeddings.input_types == ["query"]
 
 
 async def test_upsert_is_deterministic_and_scoped():
