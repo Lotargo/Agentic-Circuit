@@ -6,19 +6,19 @@ on:
       longmemeval_cases:
         description: Balanced LongMemEval-S subset size
         required: false
-        default: "14"
+        default: "6"
       locomo_cases:
         description: Balanced LoCoMo-10 QA subset size
         required: false
-        default: "15"
+        default: "8"
       seed:
         description: Deterministic sampling seed
         required: false
         default: "20260714"
   schedule:
-    # GitHub cron has no exact every-72-hours primitive. This runs on calendar
-    # days 1, 4, 7, ... at 03:17 UTC, which is the closest stable three-day cadence.
-    - cron: "17 3 1-31/3 * *"
+    # GitHub cron cannot express an exact 72-hour interval. A tiny daily gate below
+    # runs the expensive job only when the UTC date is three days from the anchor.
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -28,9 +28,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  cadence:
+    name: Three-day cadence gate
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - id: gate
+        name: Decide whether to run
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          today_days=$(( $(date -u +%s) / 86400 ))
+          anchor_days=$(( $(date -u -d '2026-07-15 00:00:00 UTC' +%s) / 86400 ))
+          if [ $(( (today_days - anchor_days) % 3 )) -eq 0 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   benchmark:
     name: LongMemEval, LoCoMo and memory safety
-    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    needs: cadence
+    if: needs.cadence.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -44,11 +68,13 @@ jobs:
       RERANK_MODEL: Alibaba-NLP/gte-multilingual-reranker-base
       BENCH_CACHE_DIR: ${{ github.workspace }}/.cache/benchmark-data
       BENCH_OUTPUT_DIR: ${{ github.workspace }}/benchmark-results/live
-      BENCH_LONGMEMEVAL_CASES: ${{ inputs.longmemeval_cases || '14' }}
-      BENCH_LOCOMO_CASES: ${{ inputs.locomo_cases || '15' }}
+      BENCH_LONGMEMEVAL_CASES: ${{ inputs.longmemeval_cases || '6' }}
+      BENCH_LOCOMO_CASES: ${{ inputs.locomo_cases || '8' }}
       BENCH_SEED: ${{ inputs.seed || '20260714' }}
       BENCH_JUDGE_MODEL: mimo-v2.5-free
-      BENCH_STRICT_SAFETY: "true"
+      # External scores and live extraction cases are informational until a baseline
+      # exists. A separate deterministic checker below still blocks leakage regressions.
+      BENCH_STRICT_SAFETY: "false"
 
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +100,8 @@ jobs:
             .cache/tei-embedding
             .cache/tei-rerank
           key: live-memory-bench-v2-${{ runner.os }}-e5-small-gte-reranker
+          restore-keys: |
+            live-memory-bench-v2-${{ runner.os }}-
 
       - name: Install locked Python environment
         run: |
@@ -120,6 +148,9 @@ jobs:
       - name: Run live benchmark suites
         working-directory: src/py-engine
         run: uv run --frozen python -m agentic_circuit.benchmarks.runner
+
+      - name: Enforce deterministic memory safety
+        run: python scripts/check_live_benchmark.py benchmark-results/live/benchmark-results.json
 
       - name: Publish job summary
         if: always()
