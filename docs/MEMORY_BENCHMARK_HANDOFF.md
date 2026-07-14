@@ -2,16 +2,14 @@
 
 Last updated: 2026-07-14
 
-This document is the starting point for the next development session. It records the current benchmark infrastructure, the two stored reference runs, the conclusions that are already supported by data, and the next experiments that must be kept isolated from one another.
+This document is the starting point for the next development session. It records the current benchmark infrastructure, three comparable stored runs, the completed provider experiment and the next isolated experiment.
 
 ## Start here
 
-Repository: `Lotargo/chat-openwebui`
-
-Implementation baseline commit summarized by this handoff, before the documentation-only merge:
+Repository:
 
 ```text
-c419434f8f7f07a5da26b8095e458f997f21d5b6
+Lotargo/chat-openwebui
 ```
 
 Relevant workflow:
@@ -23,13 +21,19 @@ Relevant workflow:
 Benchmark implementation:
 
 ```text
-src/py-engine/agentic_circuit/benchmarks/
+src/py-engine/src/agentic_circuit/benchmarks/
 ```
 
-Neon analytics documentation:
+Analytics documentation:
 
 ```text
 docs/BENCHMARK_ANALYTICS.md
+```
+
+Completed Experiment A report:
+
+```text
+docs/MEMORY_BENCHMARK_EXPERIMENT_A.md
 ```
 
 Database schema migration:
@@ -46,13 +50,27 @@ It currently:
 
 - runs LongMemEval-S adapted cases, LoCoMo-10 adapted cases and the internal memory lifecycle suite;
 - starts local Qdrant, multilingual E5 and the GTE multilingual reranker in GitHub Actions;
-- enforces four deterministic safety cases;
+- enforces four deterministic blocking safety cases;
 - stores every completed run in Neon under the `ml_eval` schema;
 - stores suite aggregates, every individual case and provider telemetry;
 - appends deltas against the previous compatible run to the Markdown artifact;
 - uploads JSON and Markdown artifacts with 90-day retention;
 - serializes expensive runs without cancelling an already running benchmark;
-- uses Node.js 24-compatible GitHub Actions versions.
+- uses Node.js 24-compatible GitHub Actions versions;
+- accepts independent manual `fallback_model` and `judge_model` inputs;
+- keeps `mimo-v2.5-free` as the scheduled default until another provider passes an isolated comparison.
+
+Provider telemetry now records:
+
+- requested attempts, successes and failures by model;
+- request role for `memory_select`, `memory_extract`, `benchmark_reader` and `benchmark_judge`;
+- provider-reported model identifier on successful responses;
+- fallback reason;
+- parameter-compatibility retry reason;
+- judge request errors;
+- empty judge responses;
+- judge parse errors;
+- bounded raw judge responses only when parsing fails.
 
 Required repository secrets:
 
@@ -75,7 +93,13 @@ The benchmark uses local Qdrant and does not call LangSearch.
 
 ## Neon registry
 
-Project database: `neondb`
+Project: `liza-ds`
+
+Database:
+
+```text
+neondb
+```
 
 Schema:
 
@@ -85,243 +109,224 @@ ml_eval
 
 Objects:
 
-- `benchmark_runs`
-- `benchmark_suite_metrics`
-- `benchmark_case_results`
-- `benchmark_provider_usage`
-- `benchmark_suite_deltas`
+- `benchmark_runs`;
+- `benchmark_suite_metrics`;
+- `benchmark_case_results`;
+- `benchmark_provider_usage`;
+- `benchmark_suite_deltas`.
 
-The registry is already populated with two comparable runs in category:
+Comparable category:
 
 ```text
 live-memory-adapted-v1
 ```
 
-## Stored reference runs
+## Stored comparable runs
 
 ### Run 1: initial baseline
 
 ```text
 GitHub run: 29304658723
 Git commit: 0a1dbffd10b9760aa9268e205dd23ed28989c071
+Primary: big-pickle
+Fallback: mimo-v2.5-free
+Judge: mimo-v2.5-free
 Seed: 20260714
 Cases: 6 LongMemEval + 8 LoCoMo + 6 internal
 ```
 
-### Run 2: second reference run
+### Run 2: second reference
 
 ```text
 GitHub run: 29309563088
 Git commit: c419434f8f7f07a5da26b8095e458f997f21d5b6
+Primary: big-pickle
+Fallback: mimo-v2.5-free
+Judge: mimo-v2.5-free
 Seed: 20260714
 Cases: 6 LongMemEval + 8 LoCoMo + 6 internal
 ```
 
-### Aggregate comparison
+### Run 3: Experiment A
 
-| Suite | Metric | Run 1 | Run 2 |
-|---|---:|---:|---:|
-| LongMemEval-S | Recall@10 | 1.0000 | 1.0000 |
-| LongMemEval-S | MRR@10 | 0.7083 | 0.7083 |
-| LongMemEval-S | Token F1 | 0.1468 | 0.0306 |
-| LongMemEval-S | Mean latency | 62.95 s | 68.09 s |
-| LoCoMo-10 | Recall@10 | 0.7188 | 0.7188 |
-| LoCoMo-10 | MRR@10 | 0.3802 | 0.3802 |
-| LoCoMo-10 | Token F1 | 0.0506 | 0.0348 |
-| LoCoMo-10 | Mean latency | 105.45 s | 94.01 s |
-| Internal lifecycle | Passed | 6/6 | 4/6 |
-| Internal lifecycle | Mean latency | 14.34 s | 6.14 s |
+```text
+GitHub run: 29312255221
+Reported benchmark commit: caf1fe7e33d4e991bbf288138d949d77dad0c17c
+Primary request: big-pickle
+Fallback: deepseek-v4-flash-free
+Judge: deepseek-v4-flash-free
+Seed: 20260714
+Cases: 6 LongMemEval + 8 LoCoMo + 6 internal
+```
 
-The four blocking safety checks passed in both runs:
+The Experiment A artifact is named:
+
+```text
+live-memory-benchmark-6
+```
+
+## Aggregate comparison
+
+| Suite | Metric | Run 1 | Run 2 | Experiment A |
+|---|---:|---:|---:|---:|
+| LongMemEval-S | Recall@10 | 1.0000 | 1.0000 | 1.0000 |
+| LongMemEval-S | MRR@10 | 0.7083 | 0.7083 | 0.7083 |
+| LongMemEval-S | Token F1 | 0.1468 | 0.0306 | 0.1187 |
+| LongMemEval-S | Mean latency | 62.95 s | 68.09 s | 50.37 s |
+| LoCoMo-10 | Recall@10 | 0.7188 | 0.7188 | 0.7188 |
+| LoCoMo-10 | MRR@10 | 0.3802 | 0.3802 | 0.3802 |
+| LoCoMo-10 | Token F1 | 0.0506 | 0.0348 | 0.0534 |
+| LoCoMo-10 | Mean latency | 105.45 s | 94.01 s | 90.66 s |
+| Internal lifecycle | Passed | 6/6 | 4/6 | 6/6 |
+| Internal lifecycle | Mean latency | 14.34 s | 6.14 s | 10.42 s |
+
+The four blocking safety checks passed in all three runs:
 
 - project isolation;
 - conversation isolation;
 - supersession;
 - unknown abstention.
 
-The two non-blocking LLM-dependent cases failed in Run 2:
+Experiment A also passed both non-blocking LLM-dependent internal cases:
 
-- `live gate preference extraction` returned `[]`;
-- `live gate knowledge update` returned `supabase neon` instead of a clean superseding memory statement.
+- live gate preference extraction;
+- live gate knowledge update.
 
-## Provider telemetry
+## Experiment A verdict
 
-Current benchmark model chain:
+Experiment A is complete and did not support replacing MiMo with DeepSeek.
 
-```text
-Primary: big-pickle
-Fallback: mimo-v2.5-free
-Judge: mimo-v2.5-free
-```
+Provider reliability:
 
-Run 1:
+| Run | Fallback / judge | Attempts | Successes | Failures | Success rate |
+|---|---|---:|---:|---:|---:|
+| Run 1 | `mimo-v2.5-free` | 25 | 3 | 22 | 12.0% |
+| Run 2 | `mimo-v2.5-free` | 22 | 2 | 20 | 9.1% |
+| Experiment A | `deepseek-v4-flash-free` | 22 | 1 | 21 | 4.5% |
 
-| Model | Attempts | Successes | Failures |
-|---|---:|---:|---:|
-| big-pickle | 40 | 24 | 16 |
-| mimo-v2.5-free | 25 | 3 | 22 |
-
-Run 2:
-
-| Model | Attempts | Successes | Failures |
-|---|---:|---:|---:|
-| big-pickle | 39 | 27 | 12 |
-| mimo-v2.5-free | 22 | 2 | 20 |
-
-MiMo did not provide a usable external judge score in either reference run. External `judge_accuracy` remained null.
-
-## Conclusions already supported by data
-
-### Stable layer
-
-The retrieval layer is reproducible across the two runs:
-
-- LongMemEval Recall@10 and MRR@10 were identical;
-- LoCoMo Recall@10 and MRR@10 were identical;
-- scope isolation and deterministic lifecycle behavior remained intact.
-
-Do not start by replacing embeddings, Qdrant or the reranker. The current evidence does not identify them as the primary source of variance.
-
-### Unstable layer
-
-Most variance appears after raw retrieval:
-
-- LLM memory extraction;
-- `MEMORY_SELECT` selection count;
-- free-form reader output;
-- remote judge behavior.
-
-The same retrieved candidates can produce selection counts ranging from zero to six between runs. This can erase relevant evidence even when raw Recall@10 is correct.
-
-### Metric limitation
-
-Token F1 is strongly affected by translation, inflection and verbose answers. It must not be treated as the sole answer-quality metric.
-
-A neutral factual reader and a reliable semantic judge are required before interpreting answer quality as a single score.
-
-## Decision for the next session: replace MiMo
-
-Replace every benchmark role currently using:
+Judge coverage in Experiment A:
 
 ```text
-mimo-v2.5-free
+0 / 14
 ```
 
-with:
+All fourteen DeepSeek judge requests returned an empty completion.
 
 ```text
-deepseek-v4-flash-free
+judge_request_errors: 0
+judge_empty_responses: 14
+judge_parse_errors: 0
 ```
-
-Unless a later experiment explicitly separates the roles, this replacement applies to both:
-
-- fallback generation;
-- external benchmark judge.
-
-Keep `big-pickle` as the primary model for the first comparison after the change.
-
-The first post-change run must use the same inputs:
-
-```text
-LongMemEval cases: 6
-LoCoMo cases: 8
-Seed: 20260714
-Category: live-memory-adapted-v1
-```
-
-Do not combine this model replacement with fusion, selector, reader or chunking changes. The purpose of the first run is to isolate the provider effect.
-
-Before running, add or verify telemetry for:
-
-- actual model used for every role;
-- judge request errors;
-- judge response parse errors;
-- empty judge responses;
-- raw judge response retained only when parsing fails and without secrets;
-- fallback reason;
-- parameter-compatibility retry reason.
-
-## Fusion hypothesis: RRF versus RSF
-
-The current hybrid retrieval uses weighted Reciprocal Rank Fusion with:
-
-```text
-RAG_RRF_K=60
-RAG_DENSE_WEIGHT=0.6
-RAG_LEXICAL_WEIGHT=0.4
-```
-
-Working hypothesis: rank-only RRF may discard useful score magnitude and can behave poorly without tuning for this corpus.
-
-Investigate an RSF-style normalized score fusion as a separate experiment. In this document, RSF means relative or normalized score fusion: dense and lexical scores are converted to comparable scales before applying weights.
-
-Do not replace RRF blindly. Add a configurable fusion strategy and compare both methods on the same fixed subset.
-
-Suggested configuration boundary:
-
-```text
-RAG_FUSION_METHOD=rrf|rsf
-```
-
-For RSF, test normalization explicitly rather than hiding it inside the implementation. Candidate variants:
-
-1. Per-query min-max normalization with an epsilon for flat lists.
-2. Robust percentile or quantile scaling to reduce outlier sensitivity.
-3. Z-score normalization with clipping, only when score distributions are sufficiently stable.
-4. Rank normalization as a fallback when one source returns unusable score distributions.
-
-Record enough diagnostics to understand the result:
-
-- raw dense score;
-- raw lexical score;
-- dense rank;
-- lexical rank;
-- normalized dense score;
-- normalized lexical score;
-- final fused score;
-- normalization method;
-- source list size;
-- flat-distribution and missing-source flags.
-
-Keep the initial weights at `0.6 / 0.4` for the first RRF-versus-RSF comparison. Weight tuning must be a later experiment.
-
-Important: the two existing runs show stable RRF retrieval metrics. Therefore RSF is an optimization hypothesis, not yet a demonstrated fix for the larger end-to-end instability. Selector and reader failures can dominate even when fusion is unchanged.
-
-## Ordered next experiments
-
-Perform one change family at a time.
-
-### Experiment A: provider replacement
-
-- replace MiMo with `deepseek-v4-flash-free`;
-- keep primary model, retrieval, selector, reader and fusion unchanged;
-- run the fixed 6/8/20260714 subset;
-- compare provider success rate, judge coverage and all existing metrics.
 
 Success criteria:
 
-- external judge returns a parseable result for most cases;
-- fallback success rate is materially better than MiMo;
-- no regression in the four blocking safety checks.
+| Criterion | Result |
+|---|---|
+| Parseable external judge for most cases | Failed: 0/14 |
+| Fallback materially better than MiMo | Failed: 4.5%, below both references |
+| No blocking safety regression | Passed: 4/4, with 6/6 total internal cases passing |
 
-### Experiment B: observability and metric separation
+Decision:
 
-Add these metrics before changing selector behavior:
+- do not promote `deepseek-v4-flash-free` to the scheduled default;
+- retain role-aware telemetry;
+- retain configurable manual fallback and judge inputs;
+- keep scheduled MiMo defaults until a provider passes a controlled run.
+
+## Provider alias finding
+
+Successful requests made with the primary model name `big-pickle` were reported by OpenCode Zen as:
+
+```text
+deepseek-v4-flash
+```
+
+Successful response metadata:
+
+| Role | Provider-reported model | Count |
+|---|---|---:|
+| benchmark reader | `deepseek-v4-flash` | 14 |
+| memory selector | `deepseek-v4-flash` | 10 |
+| memory extraction | `deepseek-v4-flash` | 3 |
+| memory selector fallback | `deepseek-v4-flash-free` | 1 |
+
+This does not prove the hidden implementation behind `big-pickle`. It does mean the provider currently reports a different model identifier, so the alias or provider metadata must be investigated before treating `big-pickle` and DeepSeek as independent backends.
+
+## Conclusions supported by three runs
+
+### Retrieval is stable
+
+Raw retrieval is exactly reproducible across all three comparable runs:
+
+- LongMemEval Recall@10: `1.0000`;
+- LongMemEval MRR@10: `0.7083`;
+- LoCoMo Recall@10: `0.7188`;
+- LoCoMo MRR@10: `0.3802`.
+
+Do not start by replacing embeddings, Qdrant, the reranker or RRF. Three runs do not identify retrieval as the primary source of variance.
+
+### Evidence loss remains downstream
+
+Selector output remains unstable despite identical retrieval.
+
+Mean selected records:
+
+| Suite | Run 1 | Run 2 | Experiment A |
+|---|---:|---:|---:|
+| LongMemEval-S | 4.000 | 0.833 | 1.500 |
+| LoCoMo-10 | 4.500 | 2.750 | 2.375 |
+
+Zero-selection cases:
+
+| Suite | Run 1 | Run 2 | Experiment A |
+|---|---:|---:|---:|
+| LongMemEval-S | 2/6 | 2/6 | 3/6 |
+| LoCoMo-10 | 2/8 | 3/8 | 2/8 |
+
+The evidence path that needs measurement is:
+
+```text
+index -> raw retrieval -> selected context -> reader answer -> judge
+```
+
+### Token F1 remains insufficient
+
+Token F1 changes materially while retrieval is identical. Translation, inflection, verbosity and answer format affect it strongly.
+
+Do not interpret Token F1 as answer correctness without a reliable semantic judge and output-format diagnostics.
+
+## Next experiment: Experiment B
+
+Experiment B is now the immediate next task.
+
+Add explicit observability and metric separation without changing selector, reader, retrieval or fusion behavior.
+
+Required metrics:
 
 - raw retrieval recall;
 - selected recall;
 - answer correctness;
 - selector empty rate on answerable cases;
 - judge coverage;
+- judge empty-response rate;
 - judge parse-failure rate;
 - answer language match;
 - concise-answer compliance.
 
-This must expose where evidence is lost:
+Required case-level diagnostics:
 
-```text
-index -> raw retrieval -> selected context -> reader answer -> judge
-```
+- relevant raw document labels;
+- selected document labels;
+- whether relevant evidence was present in raw retrieval;
+- whether relevant evidence survived selection;
+- answer language;
+- answer length or requested-value compliance;
+- judge request outcome category;
+- requested model and provider-reported model by role.
+
+Do not add deterministic selector fallback yet. Experiment B must first show exactly where evidence disappears.
+
+## Later isolated experiments
 
 ### Experiment C: neutral benchmark reader
 
@@ -331,35 +336,48 @@ Create a benchmark-only factual reader that:
 - returns only the requested value or short phrase;
 - does not use the Lisa personality;
 - does not add recommendations;
-- abstains only when the selected context truly lacks the answer.
+- abstains only when selected context lacks the answer.
 
 Keep the production conversational reader separate.
 
 ### Experiment D: selector stabilization
 
-Investigate a deterministic fallback for answerable retrieval results.
+Investigate a deterministic fallback only after selected recall and answerable zero-selection rate are available.
 
-Possible rule:
+Candidate rule:
 
-- when the LLM selector returns zero items but raw retrieval contains candidates above an evidence threshold, pass a small top-N fallback set to the reader;
-- retain zero selection for real abstention cases;
-- measure the effect with `selected_recall` and unsupported-context rate.
+- when the LLM selector returns zero items but raw retrieval contains sufficiently strong evidence, pass a small top-N fallback set;
+- retain zero selection for genuine abstention cases.
 
-Do not simply force top-1 for every query. That would damage abstention behavior.
+Do not force top-1 for every query.
 
 ### Experiment E: RRF versus normalized RSF
 
-- add a fusion strategy flag;
+The current hybrid retrieval uses weighted RRF:
+
+```text
+RAG_RRF_K=60
+RAG_DENSE_WEIGHT=0.6
+RAG_LEXICAL_WEIGHT=0.4
+```
+
+RSF remains an optimization hypothesis, not a demonstrated fix.
+
+When this experiment starts:
+
+- add `RAG_FUSION_METHOD=rrf|rsf`;
 - keep datasets, seed, models, selector and reader fixed;
-- compare RRF and each normalization candidate;
-- evaluate Recall@10, MRR@10, selected recall and downstream answer correctness;
-- inspect per-category results, not only global means.
+- retain weights `0.6 / 0.4` for the first comparison;
+- record raw dense and lexical scores, ranks, normalized scores, final score and normalization flags;
+- compare Recall@10, MRR@10, selected recall and downstream correctness.
+
+Do not start Experiment E as a reaction to Experiment A. Retrieval was identical for the third consecutive run.
 
 ### Experiment F: long-session chunking
 
 Current memory text is truncated by `RAG_MAX_MEMORY_CHARS=6000` before indexing.
 
-The preferred fix is chunking with a stable parent identity, for example:
+Preferred design:
 
 ```text
 parent_session_id
@@ -367,7 +385,7 @@ chunk_id
 chunk_index
 ```
 
-Do not solve this only by setting a very large character limit. Chunking should preserve session grouping while allowing the relevant part of a long session to be retrieved independently.
+Do not solve this only by increasing the character limit. Chunking must preserve stable parent identity and allow relevant portions of long sessions to be retrieved independently.
 
 ## Experiment discipline
 
@@ -375,19 +393,20 @@ For every comparison:
 
 - use the same seed and case counts;
 - change one subsystem at a time;
-- write a new category only when the benchmark semantics or dataset composition changes;
-- retain all failed cases in Neon;
+- create a new category only when benchmark semantics or dataset composition changes;
+- retain failed cases in Neon;
 - inspect case-level deltas, not only averages;
-- do not call an adapted subset score an official leaderboard result;
+- do not call adapted subset scores official leaderboard results;
 - keep deterministic safety checks blocking;
-- keep stochastic extraction cases informational until they are made stable enough to gate CI.
+- keep stochastic extraction cases informational until stable enough to gate CI.
 
-## Immediate first task for the next session
+## Immediate task for the next session
 
-1. Read this file and `docs/BENCHMARK_ANALYTICS.md`.
-2. Locate every benchmark reference to `mimo-v2.5-free`.
-3. Replace benchmark fallback and judge roles with `deepseek-v4-flash-free`.
-4. Improve judge error telemetry before launching the run.
-5. Run the same `6 / 8 / 20260714` benchmark.
-6. Query Neon and compare against runs `29304658723` and `29309563088`.
-7. Only after that start the RRF-versus-RSF branch.
+1. Read this file and `docs/MEMORY_BENCHMARK_EXPERIMENT_A.md`.
+2. Keep scheduled provider defaults unchanged.
+3. Implement Experiment B metrics and case-level diagnostics.
+4. Add tests for judge outcome classification and selected-recall calculation.
+5. Run the same `6 / 8 / 20260714` subset.
+6. Query Neon and compare against runs `29304658723`, `29309563088` and `29312255221`.
+7. Only after Experiment B results decide whether to proceed to neutral reader or selector fallback.
+8. Do not begin RRF-versus-RSF work yet.
