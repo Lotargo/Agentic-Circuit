@@ -14,6 +14,13 @@ CONVERSATION = [
 ]
 
 
+def current_function(system_prompt: str) -> str:
+    section = system_prompt.split("## Текущая функция мышления", 1)[-1]
+    section = section.split("## Правила синтеза", 1)[0]
+    section = section.split("## Активная эмоциональная призма", 1)[0]
+    return section
+
+
 class RecordingClient:
     def __init__(self):
         self.calls: list[tuple[list[dict], object]] = []
@@ -21,17 +28,18 @@ class RecordingClient:
     async def acomplete(self, messages, model_cfg, tools=None):
         self.calls.append((messages, model_cfg))
         system = messages[0]["content"]
-        if "функцию выбора глубины" in system:
+        function = current_function(system)
+        if "функцию выбора глубины" in function:
             return LLMResult(content=ROUTE["value"], model=model_cfg.model)
-        if "единственный внешний ответ" in system:
+        if "единственный внешний ответ" in function:
             return LLMResult(content="SYNTH", model=model_cfg.model)
         role = (
             "creative"
-            if "креативн" in system
+            if "креативн" in function
             else "pragmatic"
-            if "прагматичн" in system
+            if "прагматичн" in function
             else "effective"
-            if "эффективн" in system
+            if "эффективн" in function
             else "unknown"
         )
         all_content = "\n".join(message["content"] for message in messages)
@@ -153,7 +161,7 @@ async def test_history_prism_and_scope_reach_circuit(ctx):
     circuit_calls = [
         messages
         for messages, _ in ctx._client.calls
-        if "креативн" in messages[0]["content"]
+        if "креативн" in current_function(messages[0]["content"])
     ]
     assert circuit_calls
     combined = "\n".join(message["content"] for message in circuit_calls[0])
@@ -168,7 +176,8 @@ async def test_circuit_isolation_phase2_sees_only_own_phase1(ctx):
     phase2_creative = None
     for messages, _ in ctx._client.calls:
         content = "\n".join(message["content"] for message in messages)
-        if "креативн" in messages[0]["content"] and "P1::creative" in content:
+        function = current_function(messages[0]["content"])
+        if "креативн" in function and "P1::creative" in content:
             phase2_creative = content
     assert phase2_creative is not None
     assert "P1::pragmatic" not in phase2_creative
