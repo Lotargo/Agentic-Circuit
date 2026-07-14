@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections import Counter
 from collections.abc import AsyncIterator
 from typing import Optional, Protocol
 
@@ -21,6 +22,8 @@ class LLMResult:
         completion_tokens: int = 0,
         error: Optional[str] = None,
         latency_ms: int = 0,
+        attempted_models: Optional[list[str]] = None,
+        fallback_used: bool = False,
     ):
         self.content = content
         self.model = model
@@ -28,6 +31,8 @@ class LLMResult:
         self.completion_tokens = completion_tokens
         self.error = error
         self.latency_ms = latency_ms
+        self.attempted_models = list(attempted_models or [model])
+        self.fallback_used = fallback_used
 
 
 _THINKING_TO_EXTRA = {
@@ -48,9 +53,11 @@ def _completion_params(
     messages: list[dict],
     model_cfg: ModelConfig,
     tools: Optional[list[dict]] = None,
+    *,
+    model: str | None = None,
 ) -> tuple[dict, dict]:
     params: dict = {
-        "model": model_cfg.model,
+        "model": model or model_cfg.model,
         "messages": messages,
         "temperature": model_cfg.temperature,
         "max_tokens": model_cfg.max_tokens,
@@ -94,6 +101,18 @@ class OpenAICompatibleClient:
             api_key=api_key,
             timeout=120.0,
         )
+        self._attempts: Counter[str] = Counter()
+        self._successes: Counter[str] = Counter()
+        self._failures: Counter[str] = Counter()
+        self._fallback_successes = 0
+
+    def usage_snapshot(self) -> dict:
+        return {
+            "attempts_by_model": dict(self._attempts),
+            "successes_by_model": dict(self._successes),
+            "failures_by_model": dict(self._failures),
+            "fallback_successes": self._fallback_successes,
+        }
 
     async def acomplete(
         self,
@@ -101,26 +120,49 @@ class OpenAICompatibleClient:
         model_cfg: ModelConfig,
         tools: Optional[list[dict]] = None,
     ) -> LLMResult:
-        params, extra = _completion_params(messages, model_cfg, tools)
         start = time.monotonic()
-        try:
-            response = await self._client.chat.completions.create(**params, **extra)
-            choice = response.choices[0].message
-            usage = response.usage
-            return LLMResult(
-                content=choice.content or "",
-                model=response.model,
-                prompt_tokens=usage.prompt_tokens if usage else 0,
-                completion_tokens=usage.completion_tokens if usage else 0,
-                latency_ms=int((time.monotonic() - start) * 1000),
+        errors: list[str] = []
+        attempted: list[str] = []
+        for index, model_name in enumerate(model_cfg.model_chain):
+            attempted.append(model_name)
+            self._attempts[model_name] += 1
+            params, extra = _completion_params(
+                messages,
+                model_cfg,
+                tools,
+                model=model_name,
             )
-        except Exception as exc:
-            return LLMResult(
-                content="",
-                model=model_cfg.model,
-                error=f"{type(exc).__name__}: {exc}",
-                latency_ms=int((time.monotonic() - start) * 1000),
-            )
+            try:
+                response = await self._client.chat.completions.create(**params, **extra)
+                choice = response.choices[0].message
+                content = choice.content or ""
+                if not content and not tools:
+                    raise RuntimeError("provider returned an empty completion")
+                usage = response.usage
+                self._successes[model_name] += 1
+                if index > 0:
+                    self._fallback_successes += 1
+                return LLMResult(
+                    content=content,
+                    model=response.model or model_name,
+                    prompt_tokens=usage.prompt_tokens if usage else 0,
+                    completion_tokens=usage.completion_tokens if usage else 0,
+                    latency_ms=int((time.monotonic() - start) * 1000),
+                    attempted_models=attempted,
+                    fallback_used=index > 0,
+                )
+            except Exception as exc:
+                self._failures[model_name] += 1
+                errors.append(f"{model_name}: {type(exc).__name__}: {exc}")
+
+        return LLMResult(
+            content="",
+            model=attempted[-1] if attempted else model_cfg.model,
+            error="; ".join(errors) or "all configured models failed",
+            latency_ms=int((time.monotonic() - start) * 1000),
+            attempted_models=attempted,
+            fallback_used=len(attempted) > 1,
+        )
 
     async def astream(
         self,
@@ -128,19 +170,47 @@ class OpenAICompatibleClient:
         model_cfg: ModelConfig,
         tools: Optional[list[dict]] = None,
     ) -> AsyncIterator[str]:
-        """Yield text deltas directly from the upstream provider stream."""
-        params, extra = _completion_params(messages, model_cfg, tools)
-        stream = await self._client.chat.completions.create(
-            **params,
-            **extra,
-            stream=True,
-        )
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            content = chunk.choices[0].delta.content
-            if content:
-                yield content
+        """Yield upstream deltas and fall back only before the first emitted token."""
+        errors: list[str] = []
+        for index, model_name in enumerate(model_cfg.model_chain):
+            self._attempts[model_name] += 1
+            params, extra = _completion_params(
+                messages,
+                model_cfg,
+                tools,
+                model=model_name,
+            )
+            emitted = False
+            success_recorded = False
+            try:
+                stream = await self._client.chat.completions.create(
+                    **params,
+                    **extra,
+                    stream=True,
+                )
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    content = chunk.choices[0].delta.content
+                    if not content:
+                        continue
+                    if not success_recorded:
+                        self._successes[model_name] += 1
+                        if index > 0:
+                            self._fallback_successes += 1
+                        success_recorded = True
+                    emitted = True
+                    yield content
+                if not emitted:
+                    raise RuntimeError("provider returned an empty stream")
+                return
+            except Exception as exc:
+                self._failures[model_name] += 1
+                if emitted:
+                    raise
+                errors.append(f"{model_name}: {type(exc).__name__}: {exc}")
+
+        raise RuntimeError("; ".join(errors) or "all configured models failed")
 
     async def aclose(self) -> None:
         await self._client.close()
@@ -157,6 +227,12 @@ class ClientRegistry:
                 raise KeyError(f"Unknown provider: {name}")
             self._cache[name] = OpenAICompatibleClient(self._providers[name])
         return self._cache[name]
+
+    def usage_snapshot(self) -> dict[str, dict]:
+        return {
+            provider_name: client.usage_snapshot()
+            for provider_name, client in self._cache.items()
+        }
 
     async def aclose(self) -> None:
         clients = list(self._cache.values())
