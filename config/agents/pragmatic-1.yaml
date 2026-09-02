@@ -21,9 +21,9 @@ manifests:
 default_prism: neutral
 model:
   provider: opencode-zen
-  model: big-pickle
+  model: $AGENTIC_PRIMARY_MODEL
   fallback_models:
-    - mimo-v2.5-free
+    - $AGENTIC_FALLBACK_MODEL
   temperature: 0.55
   max_tokens: 2048
   top_p: 0.85
