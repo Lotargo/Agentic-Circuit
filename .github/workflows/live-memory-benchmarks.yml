@@ -15,14 +15,15 @@ on:
         description: Deterministic sampling seed
         required: false
         default: "20260714"
+      primary_model:
+        description: Optional primary model override (otherwise uses the AGENTIC_PRIMARY_MODEL repository variable)
+        required: false
       fallback_model:
-        description: Benchmark fallback model for memory selection, extraction and reader requests
+        description: Optional fallback model override (otherwise uses the AGENTIC_FALLBACK_MODEL repository variable)
         required: false
-        default: "mimo-v2.5-free"
       judge_model:
-        description: External semantic judge model
+        description: Optional semantic judge override (otherwise uses BENCH_JUDGE_MODEL, then the fallback model)
         required: false
-        default: "mimo-v2.5-free"
   schedule:
     # GitHub cron cannot express an exact 72-hour interval. A tiny daily gate below
     # runs the expensive job only when the UTC date is three days from the anchor.
@@ -71,6 +72,8 @@ jobs:
       DATABASE_DIRECT_URL: ${{ secrets.DATABASE_DIRECT_URL }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       CONFIG_DIR: ${{ github.workspace }}/config
+      AGENTIC_PRIMARY_MODEL: ${{ inputs.primary_model || vars.AGENTIC_PRIMARY_MODEL }}
+      AGENTIC_FALLBACK_MODEL: ${{ inputs.fallback_model || vars.AGENTIC_FALLBACK_MODEL }}
       QDRANT_URL: http://127.0.0.1:6633
       EMBEDDING_SIDECAR_URL: http://127.0.0.1:8899
       RERANK_SIDECAR_URL: http://127.0.0.1:8898
@@ -82,8 +85,8 @@ jobs:
       BENCH_LONGMEMEVAL_CASES: ${{ inputs.longmemeval_cases || '6' }}
       BENCH_LOCOMO_CASES: ${{ inputs.locomo_cases || '8' }}
       BENCH_SEED: ${{ inputs.seed || '20260714' }}
-      BENCH_FALLBACK_MODEL: ${{ inputs.fallback_model || 'mimo-v2.5-free' }}
-      BENCH_JUDGE_MODEL: ${{ inputs.judge_model || 'mimo-v2.5-free' }}
+      BENCH_FALLBACK_MODEL: ${{ inputs.fallback_model || vars.AGENTIC_FALLBACK_MODEL }}
+      BENCH_JUDGE_MODEL: ${{ inputs.judge_model || vars.BENCH_JUDGE_MODEL || inputs.fallback_model || vars.AGENTIC_FALLBACK_MODEL }}
       BENCH_REGISTRY_CATEGORY: live-memory-adapted-v1
       BENCH_MIN_COMPLETION_RATIO: "0.80"
       # External scores remain informational until a healthy provider completes
@@ -99,7 +102,7 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Verify required secrets
+      - name: Verify required configuration
         shell: bash
         run: |
           test -n "$OPENCODE_ZEN_API_KEY" || {
@@ -111,38 +114,28 @@ jobs:
             echo "DATABASE_DIRECT_URL or DATABASE_URL is not configured in GitHub Actions secrets"
             exit 1
           }
+          test -n "$AGENTIC_PRIMARY_MODEL" || {
+            echo "::error::Set the AGENTIC_PRIMARY_MODEL repository variable or provide primary_model when dispatching the workflow."
+            echo "Current OpenCode Zen catalog: https://opencode.ai/docs/ru/zen/"
+            exit 1
+          }
+          test -n "$AGENTIC_FALLBACK_MODEL" || {
+            echo "::error::Set the AGENTIC_FALLBACK_MODEL repository variable or provide fallback_model when dispatching the workflow."
+            echo "Current OpenCode Zen catalog: https://opencode.ai/docs/ru/zen/"
+            exit 1
+          }
+          test -n "$BENCH_JUDGE_MODEL" || {
+            echo "::error::Set BENCH_JUDGE_MODEL or configure a fallback model."
+            exit 1
+          }
+          test "$AGENTIC_PRIMARY_MODEL" != "$AGENTIC_FALLBACK_MODEL" || {
+            echo "::error::Primary and fallback models must be different."
+            exit 1
+          }
           echo "::add-mask::$OPENCODE_ZEN_API_KEY"
           [ -n "${DATABASE_DIRECT_URL:-}" ] && echo "::add-mask::$DATABASE_DIRECT_URL"
           [ -n "${DATABASE_URL:-}" ] && echo "::add-mask::$DATABASE_URL"
-
-      - name: Configure benchmark provider chain
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          fallback = os.environ["BENCH_FALLBACK_MODEL"]
-          old = "    - mimo-v2.5-free"
-          new = f"    - {fallback}"
-          targets = [
-              Path("config/agents/memory.yaml"),
-              Path("config/agents/synthesis.yaml"),
-          ]
-          for path in targets:
-              text = path.read_text(encoding="utf-8")
-              if text.count(old) != 1:
-                  raise RuntimeError(
-                      f"expected exactly one MiMo fallback in {path}, found {text.count(old)}"
-                  )
-              path.write_text(text.replace(old, new), encoding="utf-8")
-              print(f"{path}: big-pickle -> {fallback}")
-
-          providers = Path("config/providers.yaml").read_text(encoding="utf-8")
-          for model in (fallback, os.environ["BENCH_JUDGE_MODEL"]):
-              if f"      - {model}" not in providers:
-                  raise RuntimeError(f"benchmark model is not declared: {model}")
-          PY
+          echo "Benchmark model chain: $AGENTIC_PRIMARY_MODEL -> $AGENTIC_FALLBACK_MODEL; judge=$BENCH_JUDGE_MODEL"
 
       - name: Restore benchmark and model caches
         uses: actions/cache@v6
