@@ -212,15 +212,32 @@ Scalar docs     http://127.0.0.1:9191/docs
 
 The default Compose topology intentionally does **not** publish Qdrant, TEI, or the Python engine to the host. They communicate over the private Docker network. OpenWebUI and the gateway bind to `127.0.0.1` by default.
 
-## Providers
+## Providers and model selection
 
 Provider definitions live in `config/providers.yaml`. Each provider declares:
 
 - an OpenAI-compatible base URL;
 - the environment variable containing its API key;
-- the models available through that provider.
+- an optional local model allowlist.
 
-The current runtime can retry a model without provider-specific thinking parameters when a backend rejects them. If a primary request fails before output begins, the client can move to the next configured model. Streaming fallback is allowed only before the first emitted token so a partial answer cannot be duplicated.
+Agent profiles do **not** pin concrete OpenCode Zen model IDs. They resolve the shared model chain from:
+
+```text
+AGENTIC_PRIMARY_MODEL
+AGENTIC_FALLBACK_MODEL
+```
+
+`.env.example` contains illustrative values so the default Docker stack is easy to try, but those values are examples rather than project requirements. OpenCode can add, rename, deprecate, or remove models independently of Agentic Circuit.
+
+Before choosing a Zen model, check the current OpenCode Zen catalog and endpoint mapping:
+
+<https://opencode.ai/docs/ru/zen/#%D0%B4%D0%BE%D1%81%D1%82%D1%83%D0%BF-%D0%BA-%D0%BC%D0%BE%D0%B4%D0%B5%D0%BB%D1%8F%D0%BC>
+
+OpenCode also recommends running `/models` in its TUI to see the currently recommended models. The bundled Agentic Circuit Zen adapter currently targets `/zen/v1/chat/completions`, so choose model IDs listed for that endpoint. Models exposed only through `/responses` or `/messages` require a matching provider adapter rather than only changing the model name.
+
+For dynamic providers such as Zen, `models: []` intentionally means “do not maintain a local allowlist.” Custom providers can still declare a fixed list when that is useful.
+
+The runtime can retry a model without provider-specific thinking parameters when a backend rejects them. If a primary request fails before output begins, the client can move to the next configured model. Streaming fallback is allowed only before the first emitted token so a partial answer cannot be duplicated.
 
 Provider changes made through `/v1/providers` are written atomically and followed by an engine reload without restarting the Docker stack.
 
@@ -251,6 +268,8 @@ The workflow records:
 - unsupported-context rate;
 - latency;
 - provider/model attempts, failures, and fallback behavior.
+
+Scheduled live runs do not hardcode provider model IDs. Configure the GitHub Actions repository variables `AGENTIC_PRIMARY_MODEL` and `AGENTIC_FALLBACK_MODEL`; optionally set `BENCH_JUDGE_MODEL`. Manual workflow dispatch can override these values for an experiment without editing source files.
 
 Two separate gates are enforced:
 
