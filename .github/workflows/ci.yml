@@ -13,6 +13,9 @@ jobs:
     name: Python tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      AGENTIC_PRIMARY_MODEL: test-primary-model
+      AGENTIC_FALLBACK_MODEL: test-fallback-model
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -104,12 +107,14 @@ jobs:
               type: openai-compatible
               base_url: http://127.0.0.1:18080/v1
               api_key_env: OPENCODE_ZEN_API_KEY
-              models: [big-pickle, mimo-v2.5-free]
+              models: [smoke-primary, smoke-fallback]
           YAML
       - name: Start mock provider, engine and gateway
         env:
           CONFIG_DIR: /tmp/agentic-config
           OPENCODE_ZEN_API_KEY: smoke-key
+          AGENTIC_PRIMARY_MODEL: smoke-primary
+          AGENTIC_FALLBACK_MODEL: smoke-fallback
           QDRANT_URL: http://127.0.0.1:16633
           EMBEDDING_SIDECAR_URL: http://127.0.0.1:18899
           PY_ENGINE_URL: http://127.0.0.1:8823
