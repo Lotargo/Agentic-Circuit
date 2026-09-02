@@ -22,13 +22,19 @@ The external datasets are intentionally reported as **adapted subsets**. These r
 
 ## Model selection
 
-Live benchmark model IDs are configuration, not source-code constants. Scheduled runs read these GitHub Actions repository variables:
+Live benchmark model IDs are configuration, not source-code constants. The workflow resolves models in this order:
+
+1. explicit `workflow_dispatch` inputs;
+2. GitHub Actions repository variables;
+3. the example `AGENTIC_PRIMARY_MODEL` and `AGENTIC_FALLBACK_MODEL` values in `.env.example`.
+
+The relevant repository variables are:
 
 - `AGENTIC_PRIMARY_MODEL` — primary reader/agent model;
 - `AGENTIC_FALLBACK_MODEL` — fallback model;
-- `BENCH_JUDGE_MODEL` — optional semantic judge model; when omitted, the fallback model is used.
+- `BENCH_JUDGE_MODEL` — optional semantic judge model; when omitted, the resolved fallback model is used.
 
-A manual `workflow_dispatch` can override all three without changing the repository. The workflow deliberately does not keep a local OpenCode Zen model allowlist because availability can change independently of Agentic Circuit.
+This keeps scheduled runs working out of the box while allowing model changes without a source-code commit. The workflow deliberately does not keep a local OpenCode Zen model allowlist because availability can change independently of Agentic Circuit.
 
 Check the current OpenCode Zen catalog and endpoint mapping before changing these values:
 
