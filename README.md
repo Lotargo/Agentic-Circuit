@@ -269,7 +269,7 @@ The workflow records:
 - latency;
 - provider/model attempts, failures, and fallback behavior.
 
-Scheduled live runs do not hardcode provider model IDs. Configure the GitHub Actions repository variables `AGENTIC_PRIMARY_MODEL` and `AGENTIC_FALLBACK_MODEL`; optionally set `BENCH_JUDGE_MODEL`. Manual workflow dispatch can override these values for an experiment without editing source files.
+Scheduled live runs do not hardcode provider model IDs. Model resolution follows `workflow_dispatch` overrides first, then the GitHub Actions repository variables `AGENTIC_PRIMARY_MODEL` and `AGENTIC_FALLBACK_MODEL`, and finally the example values in `.env.example`. `BENCH_JUDGE_MODEL` is optional; when it is not set, the resolved fallback model is used as the judge.
 
 Two separate gates are enforced:
 
