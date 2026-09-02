@@ -15,7 +15,6 @@ The following documents are retained as implementation history rather than curre
 
 - `LOCAL_PROVIDER_DEBUG_HANDOFF.md`
 - `MEMORY_BENCHMARK_HANDOFF.md`
-- `superpowers/specs/*`
 
 Handoff documents describe the repository at the time they were written and may reference commits, paths, experiments, or next steps that have already been superseded. They should not be used as the primary source for the current architecture.
 
