@@ -85,8 +85,10 @@ jobs:
       BENCH_FALLBACK_MODEL: ${{ inputs.fallback_model || 'mimo-v2.5-free' }}
       BENCH_JUDGE_MODEL: ${{ inputs.judge_model || 'mimo-v2.5-free' }}
       BENCH_REGISTRY_CATEGORY: live-memory-adapted-v1
-      # External scores and live extraction cases are informational until a baseline
-      # exists. A separate deterministic checker below still blocks leakage regressions.
+      BENCH_MIN_COMPLETION_RATIO: "0.80"
+      # External scores remain informational until a healthy provider completes
+      # enough cases. Deterministic safety and provider completeness are checked
+      # independently below.
       BENCH_STRICT_SAFETY: "false"
 
     steps:
@@ -164,7 +166,7 @@ jobs:
           mkdir -p .cache/tei-embedding .cache/tei-rerank
           docker run -d --name bench-qdrant \
             -p 6633:6333 \
-            qdrant/qdrant:latest
+            qdrant/qdrant:v1.19.0
           docker run -d --name bench-embedding \
             -p 8899:80 \
             -e MODEL_ID="$EMBEDDING_MODEL" \
@@ -268,6 +270,10 @@ jobs:
           path: benchmark-results/live
           if-no-files-found: error
           retention-days: 90
+
+      - name: Enforce live benchmark completeness
+        if: ${{ always() && hashFiles('benchmark-results/live/benchmark-results.json') != '' }}
+        run: python scripts/check_live_benchmark_completeness.py benchmark-results/live/benchmark-results.json
 
       - name: Print service logs on failure or cancellation
         if: ${{ always() && (failure() || cancelled()) }}
