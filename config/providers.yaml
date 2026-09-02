@@ -3,14 +3,14 @@ providers:
     type: openai-compatible
     base_url: https://opencode.ai/zen/v1/chat/completions
     api_key_env: OPENCODE_ZEN_API_KEY
-    models:
-      - big-pickle
-      - mimo-v2.5-free
-      - north-mini-code-free
-      - nemotron-3-ultra-free
-      - deepseek-v4-flash-free
-  # Доп. провайдеры добавляются отсюда (в т.ч. из UI OpenWebUI через TS-слой).
-  # Пример:
+    # Zen model availability changes over time, so this provider intentionally does
+    # not maintain a local allowlist. Agent profiles resolve model IDs from env.
+    # Current catalog and endpoint mapping:
+    # https://opencode.ai/docs/ru/zen/#%D0%B4%D0%BE%D1%81%D1%82%D1%83%D0%BF-%D0%BA-%D0%BC%D0%BE%D0%B4%D0%B5%D0%BB%D1%8F%D0%BC
+    models: []
+
+  # Additional OpenAI-compatible providers can be added here or through the gateway.
+  # Example:
   # my-other-provider:
   #   type: openai-compatible
   #   base_url: https://other.example/v1/chat/completions
