@@ -229,9 +229,9 @@ AGENTIC_FALLBACK_MODEL
 
 `.env.example` contains illustrative values so the default Docker stack is easy to try, but those values are examples rather than project requirements. OpenCode can add, rename, deprecate, or remove models independently of Agentic Circuit.
 
-Before choosing a Zen model, check the current OpenCode Zen catalog and endpoint mapping:
+Before choosing a Zen model, check the current [OpenCode Zen catalog and endpoint mapping](https://opencode.ai/docs/en/zen).
 
-[https://opencode.ai/docs/ru/zen/#%D0%B4%D0%BE%D1%81%D1%82%D1%83%D0%BF-%D0%BA-%D0%BC%D0%BE%D0%B4%D0%B5%D0%BB%D1%8F%D0%BC](https://opencode.ai/docs/en/zen)
+OpenCode also recommends running `/models` in its TUI to see the currently recommended models. The bundled Agentic Circuit Zen adapter currently targets `/zen/v1/chat/completions`, so choose model IDs listed for that endpoint. Models exposed only through `/responses` or `/messages` require a matching provider adapter rather than only changing the model name.
 
 OpenCode also recommends running `/models` in its TUI to see the currently recommended models. The bundled Agentic Circuit Zen adapter currently targets `/zen/v1/chat/completions`, so choose model IDs listed for that endpoint. Models exposed only through `/responses` or `/messages` require a matching provider adapter rather than only changing the model name.
 
