@@ -1,7 +1,7 @@
 [project]
 name = "agentic-circuit"
 version = "0.2.0"
-description = "Multi-agent agentic circuit: router, parallel perspectives, synthesis"
+description = "Multi-perspective agent runtime with isolated long-term memory and hybrid retrieval"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "langgraph>=0.2.0,<2",
