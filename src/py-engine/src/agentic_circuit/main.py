@@ -20,7 +20,7 @@ from .providers import ClientRegistry
 from .rag import EmbeddingClient, RerankClient, VectorMemory
 from .tools import WebSearchTool
 
-app = FastAPI(title="agentic-circuit-engine", version="0.4.0")
+app = FastAPI(title="Agentic Circuit Engine", version="0.2.0")
 LOGICAL_MODEL_ID = "agentic-circuit"
 ALLOWED_ROLES = {"user", "assistant"}
 ALLOWED_PRISMS = {

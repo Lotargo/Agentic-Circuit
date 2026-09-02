@@ -1,12 +1,13 @@
-# Agentic circuit — CPU-first local stack.
+# Agentic Circuit — CPU-first local stack.
 # GPU images/device reservations live in docker-compose.gpu.yml.
+# Internal retrieval and engine services are intentionally not published to the host.
 
 services:
   qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6633:6333"
-      - "6634:6334"
+    image: qdrant/qdrant:v1.19.0
+    expose:
+      - "6333"
+      - "6334"
     volumes:
       - qdrant_data:/qdrant/storage
     networks: [agentic]
@@ -14,8 +15,8 @@ services:
 
   tei-embedding:
     image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
-    ports:
-      - "8899:80"
+    expose:
+      - "80"
     environment:
       MODEL_ID: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
     volumes:
@@ -25,8 +26,8 @@ services:
 
   tei-rerank:
     image: ${RERANK_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
-    ports:
-      - "8898:80"
+    expose:
+      - "80"
     environment:
       MODEL_ID: ${RERANK_MODEL:-Alibaba-NLP/gte-multilingual-reranker-base}
     volumes:
@@ -38,8 +39,8 @@ services:
     build:
       context: .
       dockerfile: src/py-engine/Dockerfile
-    ports:
-      - "8823:8823"
+    expose:
+      - "8823"
     env_file: [.env]
     environment:
       CONFIG_DIR: /app/config
@@ -68,7 +69,7 @@ services:
       context: .
       dockerfile: src/ts-gateway/Dockerfile
     ports:
-      - "9191:9191"
+      - "127.0.0.1:9191:9191"
     env_file: [.env]
     environment:
       PY_ENGINE_URL: http://py-engine:8823
@@ -90,9 +91,9 @@ services:
     restart: unless-stopped
 
   openwebui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:v0.11.1
     ports:
-      - "3200:8080"
+      - "127.0.0.1:3200:8080"
     environment:
       OPENAI_API_BASE_URL: http://ts-gateway:9191/v1
       OPENAI_API_KEY: dummy

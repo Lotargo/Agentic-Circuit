@@ -1,67 +1,63 @@
 # Benchmark analytics registry
 
-Live memory benchmark runs are stored in Neon under the `ml_eval` schema.
-
-For the current engineering state, conclusions and ordered next experiments, start with:
-
-```text
-docs/MEMORY_BENCHMARK_HANDOFF.md
-```
+Agentic Circuit stores scheduled live-memory benchmark results in PostgreSQL/Neon under the `ml_eval` schema. The schema is committed at `db/migrations/001_ml_eval_registry.sql`, so the registry can be reproduced outside the current hosted database.
 
 ## Stored layers
 
-- `benchmark_runs`: one row per GitHub Actions run and attempt.
-- `benchmark_suite_metrics`: aggregate metrics for LongMemEval-S, LoCoMo-10 and the internal safety suite.
-- `benchmark_case_results`: every question, answer, retrieval score, latency and raw result. Manual review fields are reserved for later labeling.
-- `benchmark_provider_usage`: provider-level and per-model attempts, successes, failures and fallback telemetry.
-- `benchmark_suite_deltas`: comparison against the previous compatible run with the same category, seed, suite and case count.
+- `benchmark_runs` — one row per GitHub Actions run and attempt.
+- `benchmark_suite_metrics` — aggregate metrics for LongMemEval-S, LoCoMo-10, and the internal memory suite.
+- `benchmark_case_results` — per-case question, answer, retrieval metrics, latency, errors, and raw result metadata.
+- `benchmark_provider_usage` — provider/model attempts, successes, failures, and fallback telemetry.
+- `benchmark_suite_deltas` — comparison against the previous compatible run with the same category, seed, suite, and case count.
 
-## Reference runs
+## What the workflow measures
 
-Two comparable runs are currently stored in category `live-memory-adapted-v1`:
+The scheduled workflow runs three different classes of checks:
 
-| Role | GitHub run | Git commit | Seed |
-|---|---:|---|---:|
-| Initial baseline | `29304658723` | `0a1dbffd10b9760aa9268e205dd23ed28989c071` | `20260714` |
-| Second reference | `29309563088` | `c419434f8f7f07a5da26b8095e458f997f21d5b6` | `20260714` |
+1. **LongMemEval-S adapted subset** — long-term memory retrieval and answering.
+2. **LoCoMo-10 QA adapted subset** — question answering over long multi-session conversations.
+3. **Internal memory lifecycle and isolation** — deterministic isolation, supersession, abstention, and live memory extraction/update behavior.
 
-The two runs used the same 6 LongMemEval cases, 8 LoCoMo cases and 6 internal cases.
+The external datasets are intentionally reported as **adapted subsets**. These results are regression/evaluation signals for this runtime, not official benchmark leaderboard scores.
 
-Raw retrieval metrics were reproducible across both runs, while selector, reader, memory extraction and judge behavior were not. The detailed comparison is recorded in `docs/MEMORY_BENCHMARK_HANDOFF.md`.
+## Interpreting workflow status
 
-## Current model decision
+Two independent conditions matter:
 
-The current stored references used:
+### Memory safety
 
-```text
-Primary: big-pickle
-Fallback: mimo-v2.5-free
-Judge: mimo-v2.5-free
-```
+The deterministic safety checker is a hard gate. The workflow fails when any blocking isolation invariant regresses, including:
 
-The next controlled experiment must replace every benchmark use of `mimo-v2.5-free` with:
+- project isolation;
+- conversation isolation;
+- superseded memory handling;
+- unknown/unsupported-memory abstention.
 
-```text
-deepseek-v4-flash-free
-```
+### Live benchmark completeness
 
-Keep the first post-change run otherwise identical so the provider effect remains measurable.
+A quality score is meaningful only when the external provider actually completes enough cases. Provider quota exhaustion, persistent rate limits, or widespread upstream failures must not produce a green quality benchmark with mostly missing answers.
 
-## Fusion investigation
+The workflow therefore applies a second completeness gate after the report has been persisted and uploaded. By default, each external suite must complete at least 80% of its configured cases. The threshold is controlled by `BENCH_MIN_COMPLETION_RATIO`.
 
-The current hybrid retrieval uses weighted RRF.
+This separation keeps two questions distinct:
 
-A future isolated experiment will compare it with an RSF-style normalized score fusion. This is not yet a production decision. Normalization method, raw scores and fused scores must be observable before conclusions are drawn.
+- **Did the deterministic memory safety invariants pass?**
+- **Was the live provider healthy enough for the quality numbers to be meaningful?**
 
-Do not combine the provider replacement with the RRF-versus-RSF experiment.
+A run can pass the first question and fail the second. The uploaded artifact remains available for diagnosis.
 
-## CI behavior
+## Provider telemetry
 
-After deterministic safety checks pass, the workflow writes the report to Neon. `DATABASE_DIRECT_URL` is preferred; `DATABASE_URL` is used as a fallback. The connection string is never printed. A Neon delta section is appended to the Markdown artifact and therefore also appears in the GitHub job summary.
+Provider telemetry is stored alongside suite metrics. It includes:
 
-The workflow uses one shared concurrency group with `cancel-in-progress: false`. Expensive runs are serialized, but a new waiting request does not terminate an active benchmark.
+- attempts and successes by model;
+- failures by model;
+- fallback successes;
+- parameter-retry successes;
+- attempts, successes, and failures by role/model;
+- judge request, empty-response, and parse errors.
 
-`LANGSEARCH_API_KEY` and `QDRANT_API_KEY` are not required by this benchmark. It uses local Qdrant and local TEI containers, while the public datasets and OpenCode Zen calls use their own configured paths.
+This makes it possible to distinguish a retrieval or memory regression from a provider outage or quota failure.
 
 ## Useful queries
 
@@ -82,7 +78,7 @@ WHERE run_category = 'live-memory-adapted-v1'
 ORDER BY generated_at DESC, suite_name;
 ```
 
-Cases where retrieval found evidence but the selector returned nothing:
+Cases where retrieval found evidence but selection returned nothing:
 
 ```sql
 SELECT
@@ -116,7 +112,7 @@ JOIN ml_eval.benchmark_runs r ON r.id = p.run_id
 ORDER BY r.generated_at DESC, p.provider_name, p.model_name;
 ```
 
-Compare the two stored reference runs:
+Comparable run deltas:
 
 ```sql
 SELECT
@@ -134,8 +130,12 @@ SELECT
     delta_mrr_at_10,
     delta_mean_elapsed_seconds
 FROM ml_eval.benchmark_suite_deltas
-WHERE workflow_run_id IN (29304658723, 29309563088)
-ORDER BY generated_at, suite_name;
+WHERE run_category = 'live-memory-adapted-v1'
+ORDER BY generated_at DESC, suite_name;
 ```
 
-The database schema is also committed at `db/migrations/001_ml_eval_registry.sql` so the registry is reproducible outside the current Neon project.
+## Persistence behavior
+
+After deterministic safety checks pass, the workflow writes the report to PostgreSQL/Neon. `DATABASE_DIRECT_URL` is preferred and `DATABASE_URL` is used as a fallback. Connection strings are never printed.
+
+The Markdown report is also appended to the GitHub Job Summary and the raw benchmark directory is uploaded as a workflow artifact. The completeness gate runs after artifact publication so provider-degraded runs remain inspectable even when the workflow ultimately fails.

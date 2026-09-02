@@ -71,9 +71,9 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
       - name: Build Python engine image
-        run: docker build -f src/py-engine/Dockerfile -t chat-openwebui-py-engine:ci .
+        run: docker build -f src/py-engine/Dockerfile -t agentic-circuit-py-engine:ci .
       - name: Build TypeScript gateway image
-        run: docker build -f src/ts-gateway/Dockerfile -t chat-openwebui-ts-gateway:ci .
+        run: docker build -f src/ts-gateway/Dockerfile -t agentic-circuit-ts-gateway:ci .
 
   smoke:
     name: Gateway to engine smoke
@@ -127,6 +127,10 @@ jobs:
             sleep 1
           done
           test "$ready" = "1"
+      - name: Verify OpenAPI and Scalar documentation
+        run: |
+          curl -fsS http://127.0.0.1:9191/openapi.json | grep -q 'Agentic Circuit API'
+          curl -fsS http://127.0.0.1:9191/docs | grep -q 'Agentic Circuit API Reference'
       - name: Verify OpenAI flow, header forwarding and memory lifecycle
         run: |
           common_headers=(
@@ -138,12 +142,12 @@ jobs:
           )
           first=$(curl -fsS http://127.0.0.1:9191/v1/chat/completions \
             "${common_headers[@]}" \
-            -d '{"model":"agentic-circuit","prism":"joy","messages":[{"role":"user","content":"Меня зовут Олег"}]}')
+            -d '{"model":"agentic-circuit","prism":"joy","messages":[{"role":"user","content":"My name is Alex."}]}')
           echo "$first" | grep -q 'SMOKE_OK'
 
           second=$(curl -fsS http://127.0.0.1:9191/v1/chat/completions \
             "${common_headers[@]}" \
-            -d '{"model":"agentic-circuit","prism":"joy","messages":[{"role":"user","content":"Меня зовут Олег"},{"role":"assistant","content":"Запомнила"},{"role":"user","content":"Как меня зовут?"}]}')
+            -d '{"model":"agentic-circuit","prism":"joy","messages":[{"role":"user","content":"My name is Alex."},{"role":"assistant","content":"I will remember that."},{"role":"user","content":"What is my name?"}]}')
           echo "$second"
           echo "$second" | grep -q 'SMOKE_OK'
       - name: Print logs on failure

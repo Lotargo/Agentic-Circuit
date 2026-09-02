@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Transparent OpenAI-compatible gateway in front of the Python LangGraph engine",
+  "description": "Public OpenAI-compatible gateway and API reference for Agentic Circuit",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
