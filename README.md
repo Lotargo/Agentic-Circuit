@@ -1,4 +1,13 @@
+![Agentic Circuit](assets/banner.png)
+
 # Agentic Circuit
+
+[![CI](https://github.com/Lotargo/Agentic-Circuit/actions/workflows/ci.yml/badge.svg)](https://github.com/Lotargo/Agentic-Circuit/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.5+-3178C6.svg?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Docker](https://img.shields.io/badge/Docker-compose-2496ED.svg?logo=docker&logoColor=white)](docker-compose.yml)
+[![Vector DB](https://img.shields.io/badge/Vector%20DB-Qdrant-DC2626.svg?logo=qdrant&logoColor=white)](https://qdrant.tech/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **Agentic Circuit** is a multi-perspective agent runtime with isolated long-term memory, hybrid retrieval, provider fallback, and live evaluation.
 
@@ -19,310 +28,149 @@ OpenWebUI is included as the reference chat interface, but it is not the archite
 - **OpenAPI 3.1 + Scalar** for an interactive API reference.
 - **OpenWebUI integration** in the default Docker stack.
 
-## Architecture
+## Architecture Overview
 
-```mermaid
-flowchart TD
-    UI[OpenWebUI / API client] -->|OpenAI-compatible HTTP + SSE| GW[TypeScript Gateway]
-    GW --> PY[Python Engine / FastAPI + LangGraph]
+![Agentic Circuit Overall Flow](assets/overall-flow.png)
+*Figure 1: End-to-end request lifecycle — routing requests through the TypeScript gateway, hybrid memory recall, fast/slow path branching, perspective synthesis, and persistent memory extraction.*
 
-    PY --> RT[Router]
-    RT --> REC[Hybrid memory recall]
-    REC --> FAST[Fast path]
-    REC --> SLOW[Slow path]
+The TypeScript gateway is deliberately thin: it forwards OpenAI-compatible requests, preserves streaming semantics, exposes provider administration, and publishes the public OpenAPI document. The Python engine owns the execution graph, memory policies, provider registry, retrieval pipeline, and synthesis logic.
 
-    SLOW --> CR[Creative]
-    SLOW --> PR[Pragmatic]
-    SLOW --> EF[Effective]
+## Cognitive Circuit
 
-    FAST --> SYN[Synthesis]
-    CR --> SYN
-    PR --> SYN
-    EF --> SYN
+![Agentic Circuit Agent Flow](assets/agent-flow.png)
+*Figure 2: Multi-perspective reasoning & critic loop — three isolated cognitive lines (Creative, Pragmatic, Effective) generate initial drafts and perform private self-checks before unified synthesis.*
 
-    REC --> Q[(Qdrant)]
-    REC --> EMB[TEI multilingual E5]
-    REC --> RR[TEI cross-encoder reranker]
-    SYN --> MG[Memory gate]
-    MG --> Q
-    SYN -. optional .-> WEB[LangSearch]
-```
+Requests adaptively follow two cognitive execution paths:
 
-The TypeScript gateway is deliberately thin: it forwards OpenAI-compatible requests, preserves streaming semantics, exposes provider administration, and publishes the public OpenAPI document. The Python engine owns the graph, memory policy, provider registry, retrieval, and synthesis logic.
+- **Fast Path** (`router -> recall -> synthesis`): Low-latency direct synthesis for factual, deterministic queries.
+- **Slow Path** (`router -> recall -> parallel perspectives -> synthesis`): Deep multi-perspective analysis with dedicated local self-check critics (first pass + self-critic) before converging in synthesis.
 
-## Reasoning model
+## Expression Prism
 
-Agentic Circuit uses two execution routes.
+![Agentic Circuit Emotional Spectrum](assets/emotional-spectrum.png)
+*Figure 3: Emotional spectrum & prisms — exactly one active emotional prism shapes tone, rhythm, and style across all reasoning lines without altering facts, core identity, or memory policies.*
 
-### Fast path
+The emotional layer modulates *how* the agent communicates, never *what* it knows. Exactly one active emotional prism applies across all concurrent reasoning perspectives and synthesis:
 
-```text
-router -> recall -> synthesis
-```
+| Category | Available Emotional Prisms |
+| --- | --- |
+| **Active States** | `joy`, `flirt`, `resentment`, `arousal`, `anger`, `apathy`, `neutral`, `sadness` |
+| **Invariants** | Tone and style adapt; facts, logic, effort, and memory safety rules remain strictly untouched. |
 
-This route avoids unnecessary parallel work when a request does not benefit from multiple perspectives.
+## Memory Loop
 
-### Slow path
+![Agentic Circuit Memory Loop](assets/memory-loop.png)
+*Figure 4: Closed memory loop — hybrid recall (BM25 + dense retrieval + cross-encoder + LLM selector) primes reasoning before execution, while post-synthesis extraction classifies and gates durable knowledge into isolated Qdrant namespaces.*
 
-```text
-router -> recall
-              ├─ creative phase 1 -> self-check
-              ├─ pragmatic phase 1 -> self-check
-              └─ effective phase 1 -> self-check
-                                      ↓
-                                  synthesis
-```
+Agentic Circuit organizes long-term memory into a single Qdrant collection with typed records and cryptographic isolation:
 
-Creative, pragmatic, and effective are reasoning directions, not separate characters. The invariant identity lives in `config/manifests/personality_core.md`; emotional expression is supplied by one shared prism; synthesis applies the final trust and answer rules.
+- **Dual-Phase Cycle**: **Recall** primes reasoning via hybrid search (BM25 + multilingual E5 + RRF + cross-encoder + LLM selector); **Write** filters dialogue via an atomic memory gate post-synthesis.
+- **Strict Namespace Isolation**: Memory partitions are cryptographically derived (SHA-256) across `user`, `workspace`, `project`, and `conversation`. Cross-namespace leakage is strictly prevented.
+- **Record Types**: `user_fact`, `user_preference`, `negative_preference`, `project_decision`, `project_state`, `temporary_context`, `relationship_context`, `assistant_conclusion`.
 
-Supported prisms:
+---
 
-```text
-joy, flirt, resentment, arousal, anger, apathy, neutral, sadness
-```
+## Core Principles
 
-A prism may change tone and emphasis, but not facts, uncertainty, effort, or the memory policy.
+1. **Unified Personality Core**: The agent maintains a single persistent identity (`personality_core.md`). Perspectives analyze and prisms express, but the underlying entity remains invariant.
+2. **Cognitive Isolation**: Parallel reasoning lines (Creative, Pragmatic, Effective) operate in strictly isolated contexts with private self-critics before final synthesis.
+3. **Singular Expression State**: Exactly one emotional prism governs voice and style across the entire reasoning chain at any moment.
+4. **Gated Memory Invariants**: External and historical memory is treated as untrusted context. Only verified, atomic facts passing strict gatekeeping are stored.
+5. **Adaptive Route Economy**: Trivial queries take the fast route; complex challenges dynamically engage the multi-perspective circuit.
 
-## Long-term memory
+---
 
-New memory is stored in a single Qdrant collection named `memory`. Records are typed instead of being separated into per-agent collections.
+## Quick Start
 
-Current memory types:
-
-```text
-user_fact
-user_preference
-negative_preference
-project_decision
-project_state
-temporary_context
-relationship_context
-assistant_conclusion
-```
-
-The memory gate runs after synthesis and can persist only short atomic records with a canonical key, source, confidence, importance, and optional TTL.
-
-It is designed not to persist greetings, disposable questions, secrets, internal drafts, or ordinary answer text.
-
-### Isolation
-
-Persistent memory is enabled only when a stable user identifier is available. User, workspace, project, and conversation identifiers are transformed into SHA-256-derived opaque namespaces before storage or retrieval.
-
-Project-specific memories are not returned outside their project context. Temporary context is restricted to its conversation. A request can disable persistent memory completely with:
-
-```json
-{
-  "memory": false
-}
-```
-
-## Retrieval pipeline
-
-One recall pass happens before the fast/slow branch and is shared by every perspective:
-
-1. lazy BM25 hydration inside the current user scope;
-2. multilingual E5 dense retrieval;
-3. lexical filtering of zero-match documents;
-4. weighted reciprocal-rank fusion;
-5. status, TTL, project, and conversation filters;
-6. cross-encoder reranking;
-7. confidence, importance, freshness, source-quality, and project-match weighting;
-8. a final `MEMORY_SELECT` model pass that removes merely similar or contradictory memories.
-
-The current user message always has higher authority than retrieved memory. Memory and web results are treated as untrusted data rather than instructions.
-
-## API and Scalar
-
-The default gateway is available at:
-
-```text
-http://127.0.0.1:9191
-```
-
-Interactive Scalar reference:
-
-```text
-http://127.0.0.1:9191/docs
-```
-
-OpenAPI 3.1 document:
-
-```text
-http://127.0.0.1:9191/openapi.json
-```
-
-Primary routes:
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/healthz` | Gateway health |
-| `GET` | `/v1/models` | OpenAI-compatible model list |
-| `POST` | `/v1/chat/completions` | Chat completions and SSE streaming |
-| `GET` | `/v1/providers` | Read provider configuration |
-| `POST` | `/v1/providers` | Add or update a provider |
-| `DELETE` | `/v1/providers?name=...` | Delete a provider |
-
-Provider administration requires `PROVIDERS_ADMIN_TOKEN` through `X-Admin-Token` or a Bearer token. If the token is not configured, provider administration is disabled.
-
-See [`docs/API_MAP.md`](docs/API_MAP.md) for the complete public/internal route map, memory context headers, and trust boundaries.
-
-## Example request
-
-```bash
-curl http://127.0.0.1:9191/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -H 'X-User-Id: example-user' \
-  -H 'X-Project-Id: example-project' \
-  -d '{
-    "model": "agentic-circuit",
-    "prism": "neutral",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Summarize the decisions we made for this project."
-      }
-    ]
-  }'
-```
-
-Streaming uses the same endpoint with `"stream": true` and returns OpenAI-style Server-Sent Events.
-
-## Local run
-
-Copy the environment template and start the stack:
+### 1. Run with Docker Compose
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-For NVIDIA GPUs:
+*(For NVIDIA GPU acceleration, append `-f docker-compose.gpu.yml`)*
+
+| Service | Local URL | Notes |
+| --- | --- | --- |
+| **OpenWebUI** | `http://127.0.0.1:3200` | Reference chat UI |
+| **Agentic Gateway** | `http://127.0.0.1:9191` | OpenAI-compatible API endpoint |
+| **Scalar Docs** | `http://127.0.0.1:9191/docs` | Interactive OpenAPI 3.1 reference |
+
+Internal services (Qdrant, TEI embeddings, Python engine) communicate strictly over the private Docker network.
+
+### 2. Example API Call
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+curl http://127.0.0.1:9191/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-User-Id: example-user' \
+  -H 'X-Project-Id: example-project' \
+  -d '{
+    "model": "agentic-circuit",
+    "prism": "neutral",
+    "messages": [
+      {"role": "user", "content": "Summarize key architectural decisions."}
+    ]
+  }'
 ```
 
-Default local entry points:
+---
+
+## API Reference & Administration
+
+The TypeScript gateway exposes standard OpenAI endpoints alongside runtime provider administration:
+
+| Method | Path | Description | Access |
+| --- | --- | --- | --- |
+| `GET` | `/healthz` | Gateway & subsystem health | Public |
+| `GET` | `/v1/models` | OpenAI-compatible model list | Public |
+| `POST` | `/v1/chat/completions` | Standard chat completion & SSE streaming | Public |
+| `GET` | `/v1/providers` | Read registered model providers | Admin (`X-Admin-Token`) |
+| `POST` | `/v1/providers` | Upsert model provider configuration | Admin (`X-Admin-Token`) |
+| `DELETE` | `/v1/providers` | Remove model provider | Admin (`X-Admin-Token`) |
+
+Complete schemas, security policies, and memory headers are documented in [`docs/API_MAP.md`](docs/API_MAP.md) and Scalar (`/docs`).
+
+---
+
+## Model Providers & Resilience
+
+Configuration resides in `config/providers.yaml`. Runtime model selection dynamically resolves through primary and fallback chains:
 
 ```text
-OpenWebUI        http://127.0.0.1:3200
-Agentic Circuit http://127.0.0.1:9191
-Scalar docs     http://127.0.0.1:9191/docs
+AGENTIC_PRIMARY_MODEL  ──(on failure / context limits)──>  AGENTIC_FALLBACK_MODEL
 ```
 
-The default Compose topology intentionally does **not** publish Qdrant, TEI, or the Python engine to the host. They communicate over the private Docker network. OpenWebUI and the gateway bind to `127.0.0.1` by default.
+- **OpenCode Zen & Custom Providers**: Supports standard OpenAI endpoints and OpenCode Zen with parameter adaptation (stripping unsupported thinking parameters on retry).
+- **Streaming Guard**: Provider fallback switches seamlessly before the first token is emitted to prevent duplicate or corrupted output.
+- **Hot Reload**: Provider updates submitted via `/v1/providers` reload the engine without stack downtime.
 
-## Providers and model selection
+---
 
-Provider definitions live in `config/providers.yaml`. Each provider declares:
+## Evaluation & Verification
 
-- an OpenAI-compatible base URL;
-- the environment variable containing its API key;
-- an optional local model allowlist.
+### Quality & Safety Gates
 
-Agent profiles do **not** pin concrete OpenCode Zen model IDs. They resolve the shared model chain from:
+1. **Deterministic RAG Suite** (`rag_eval.json`): Regression suite testing user/project isolation, TTL expiration, negative preferences, and forbidden contamination (Recall@K, MRR).
+2. **Live Memory Benchmarks** (`live-memory-benchmarks.yml`): Continuous validation against adapted LongMemEval-S and LoCoMo-10 QA suites with automated LLM judges.
 
-```text
-AGENTIC_PRIMARY_MODEL
-AGENTIC_FALLBACK_MODEL
-```
-
-`.env.example` contains illustrative values so the default Docker stack is easy to try, but those values are examples rather than project requirements. OpenCode can add, rename, deprecate, or remove models independently of Agentic Circuit.
-
-Before choosing a Zen model, check the current [OpenCode Zen catalog and endpoint mapping](https://opencode.ai/docs/en/zen).
-
-OpenCode also recommends running `/models` in its TUI to see the currently recommended models. The bundled Agentic Circuit Zen adapter currently targets `/zen/v1/chat/completions`, so choose model IDs listed for that endpoint. Models exposed only through `/responses` or `/messages` require a matching provider adapter rather than only changing the model name.
-
-OpenCode also recommends running `/models` in its TUI to see the currently recommended models. The bundled Agentic Circuit Zen adapter currently targets `/zen/v1/chat/completions`, so choose model IDs listed for that endpoint. Models exposed only through `/responses` or `/messages` require a matching provider adapter rather than only changing the model name.
-
-For dynamic providers such as Zen, `models: []` intentionally means “do not maintain a local allowlist.” Custom providers can still declare a fixed list when that is useful.
-
-The runtime can retry a model without provider-specific thinking parameters when a backend rejects them. If a primary request fails before output begins, the client can move to the next configured model. Streaming fallback is allowed only before the first emitted token so a partial answer cannot be duplicated.
-
-Provider changes made through `/v1/providers` are written atomically and followed by an engine reload without restarting the Docker stack.
-
-## Evaluation
-
-### Deterministic RAG regression set
-
-`src/py-engine/tests/fixtures/rag_eval.json` covers small deterministic scenarios such as:
-
-- user isolation;
-- project isolation;
-- superseded decisions;
-- negative preferences;
-- conversation-bound temporary context.
-
-The test harness measures Recall@K, Precision@K, MRR, and forbidden-memory contamination. This is a regression barrier, not a substitute for long-dialog evaluation.
-
-### Live memory benchmarks
-
-`.github/workflows/live-memory-benchmarks.yml` runs adapted subsets of LongMemEval-S and LoCoMo-10 QA together with internal lifecycle/isolation cases.
-
-The workflow records:
-
-- token F1;
-- semantic judge accuracy;
-- Recall@10;
-- MRR@10;
-- unsupported-context rate;
-- latency;
-- provider/model attempts, failures, and fallback behavior.
-
-Scheduled live runs do not hardcode provider model IDs. Model resolution follows `workflow_dispatch` overrides first, then the GitHub Actions repository variables `AGENTIC_PRIMARY_MODEL` and `AGENTIC_FALLBACK_MODEL`, and finally the example values in `.env.example`. `BENCH_JUDGE_MODEL` is optional; when it is not set, the resolved fallback model is used as the judge.
-
-Two separate gates are enforced:
-
-1. deterministic memory-safety invariants must pass;
-2. each external suite must complete enough cases for its quality score to be meaningful.
-
-The default completeness threshold is 80%. A provider-degraded run can therefore fail even when deterministic isolation remains healthy. Reports are uploaded before the completeness gate, so failed live runs remain inspectable instead of disappearing behind a red status.
-
-See [`docs/BENCHMARK_ANALYTICS.md`](docs/BENCHMARK_ANALYTICS.md) for registry and interpretation details.
-
-## Development
-
-Python engine:
+### Local Development
 
 ```bash
-cd src/py-engine
-uv sync --frozen --extra test
-uv run --frozen pytest
+# Python Engine tests
+cd src/py-engine && uv sync --frozen --extra test && uv run pytest
+
+# TypeScript Gateway build & checks
+cd src/ts-gateway && npm ci && npm run typecheck && npm run build
 ```
 
-TypeScript gateway:
+---
 
-```bash
-cd src/ts-gateway
-npm ci
-npm run typecheck
-npm run build
-npm run dev
-```
+## Documentation & License
 
-## CI
+- Detailed guides: [`docs/README.md`](docs/README.md)
+- Route and context map: [`docs/API_MAP.md`](docs/API_MAP.md)
+- Benchmark analytics: [`docs/BENCHMARK_ANALYTICS.md`](docs/BENCHMARK_ANALYTICS.md)
 
-The normal CI pipeline does not require external provider secrets. It checks:
-
-- Python lock consistency and pytest;
-- persona/prompt and memory-manager contracts;
-- user/project/conversation memory isolation;
-- TTL, supersession, deterministic upsert, and BM25 fallback;
-- deterministic RAG metrics and forbidden-memory rate;
-- model and parameter fallback semantics;
-- TypeScript typecheck and build;
-- OpenAPI/Scalar gateway availability;
-- Docker Compose validation and both service builds;
-- an HTTP smoke path from a mock provider through the Python engine and TypeScript gateway.
-
-The heavier scheduled workflow separately starts real Qdrant and TEI services and stores reproducible benchmark artifacts.
-
-## Documentation
-
-Start with [`docs/README.md`](docs/README.md).
-
-Engineering handoff notes and historical implementation plans are intentionally separated from current operating documentation. They are retained for provenance but should not be treated as the current source of truth.
-
-## License
-
-Agentic Circuit is released under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE).
