@@ -20,6 +20,22 @@ The scheduled workflow runs three different classes of checks:
 
 The external datasets are intentionally reported as **adapted subsets**. These results are regression/evaluation signals for this runtime, not official benchmark leaderboard scores.
 
+## Model selection
+
+Live benchmark model IDs are configuration, not source-code constants. Scheduled runs read these GitHub Actions repository variables:
+
+- `AGENTIC_PRIMARY_MODEL` — primary reader/agent model;
+- `AGENTIC_FALLBACK_MODEL` — fallback model;
+- `BENCH_JUDGE_MODEL` — optional semantic judge model; when omitted, the fallback model is used.
+
+A manual `workflow_dispatch` can override all three without changing the repository. The workflow deliberately does not keep a local OpenCode Zen model allowlist because availability can change independently of Agentic Circuit.
+
+Check the current OpenCode Zen catalog and endpoint mapping before changing these values:
+
+<https://opencode.ai/docs/ru/zen/#%D0%B4%D0%BE%D1%81%D1%82%D1%83%D0%BF-%D0%BA-%D0%BC%D0%BE%D0%B4%D0%B5%D0%BB%D1%8F%D0%BC>
+
+The bundled Zen adapter currently targets `/zen/v1/chat/completions`, so select model IDs documented for that endpoint.
+
 ## Interpreting workflow status
 
 Two independent conditions matter:
